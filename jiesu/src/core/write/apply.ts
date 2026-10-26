@@ -1,5 +1,4 @@
 import type {
-  File,
   JSXAttribute,
   JSXElement,
   JSXExpressionContainer,
@@ -10,7 +9,7 @@ import type {
   TemplateLiteral,
 } from '@babel/types';
 
-import { findJsxElement, parseSource, type ElementLocator } from '../locate/parse.js';
+import { anchorOf, findJsxElement, parseSource, type ElementLocator } from '../locate/parse.js';
 import { parseClass, type StyleCategory } from './tailwind-classes.js';
 import { pxToTailwindClass } from './units.js';
 
@@ -51,6 +50,8 @@ export interface ApplyResult {
   changed: boolean;
   /** 命中的 class token 数量 */
   matched?: number;
+  /** 写回后元素的新结构锚点（行号可能已漂移，客户端据此重新选中） */
+  anchor?: string;
 }
 
 /* ------------------------------------------------------------------ *
@@ -190,14 +191,15 @@ function applyEdits(code: string, edits: SourceEdit[]): string {
  * ------------------------------------------------------------------ */
 
 export function applyOp(code: string, locator: ElementLocator, op: StyleOp): ApplyResult {
-  const ast: File = parseSource(code);
-  const located = findJsxElement(ast, locator);
+  const tree = parseSource(code);
+  const located = findJsxElement(tree, locator);
   if (!located.ok) {
     return { status: 'not-found', reason: located.reason, edits: [], changed: false };
   }
 
   const el = located.element;
   const edits: SourceEdit[] = [];
+  const anchor = anchorOf(located.path);
 
   if (op.kind === 'class' || op.kind === 'classByPx') {
     const category: StyleCategory = op.category;
@@ -273,12 +275,12 @@ export function applyOp(code: string, locator: ElementLocator, op: StyleOp): App
         changed: false,
       };
     }
-    return finish(code, edits, matched);
+    return finish(code, edits, matched, anchor);
   }
 
   if (op.kind === 'text') {
-    const parent: JSXElement | null = located.parent;
-    const textNode = parent?.children.find(
+    // 元素**自身**的文本在它自己的 children 里（不是父元素的）
+    const textNode = located.jsx.children.find(
       (child) => child.type === 'JSXText' && child.value.trim().length > 0,
     );
     if (!textNode || textNode.type !== 'JSXText') {
@@ -295,7 +297,7 @@ export function applyOp(code: string, locator: ElementLocator, op: StyleOp): App
       before: code.slice(textNode.start as number, textNode.end as number),
       after: op.to,
     });
-    return finish(code, edits, 1);
+    return finish(code, edits, 1, anchor);
   }
 
   // inlineStyle
@@ -344,13 +346,18 @@ export function applyOp(code: string, locator: ElementLocator, op: StyleOp): App
       changed: false,
     };
   }
-  return finish(code, edits, 1);
+  return finish(code, edits, 1, anchor);
 }
 
-function finish(original: string, edits: SourceEdit[], matched: number): ApplyResult {
+function finish(
+  original: string,
+  edits: SourceEdit[],
+  matched: number,
+  anchor?: string,
+): ApplyResult {
   const updated = applyEdits(original, edits);
   if (updated === original) {
-    return { status: 'ok', changed: false, code: original, edits, matched };
+    return { status: 'ok', changed: false, code: original, edits, matched, anchor };
   }
   return {
     status: 'ok',
@@ -359,5 +366,6 @@ function finish(original: string, edits: SourceEdit[], matched: number): ApplyRe
     diff: computeDiff(original, updated),
     edits,
     matched,
+    anchor,
   };
 }

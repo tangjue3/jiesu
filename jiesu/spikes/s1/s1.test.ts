@@ -13,7 +13,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DEMO = join(HERE, 'demo');
 
 describe('S1 · 编译期注入', () => {
-  it('给每个 JSX 元素注入 data-jiesu-src，且不破坏原格式', () => {
+  it('给每个 JSX 元素注入 data-jiesu-src 与 data-jiesu-id，且不破坏原格式', () => {
     const code = `export function Card() {
   return (
     <div className="p-4">
@@ -29,10 +29,18 @@ describe('S1 · 编译期注入', () => {
 
     expect(result.injected).toBe(2);
     expect(result.tooLate).toBe(false);
-    expect(result.code).toContain('<div data-jiesu-src="src/Card.tsx:3:4" className="p-4">');
-    expect(result.code).toContain('<h2 data-jiesu-src="src/Card.tsx:4:6">标题</h2>');
+    expect(result.code).toContain(
+      '<div data-jiesu-src="src/Card.tsx:3:4" data-jiesu-id="src/Card.tsx#0" className="p-4">',
+    );
+    expect(result.code).toContain(
+      '<h2 data-jiesu-src="src/Card.tsx:4:6" data-jiesu-id="src/Card.tsx#0.0">标题</h2>',
+    );
     // 原始代码除插入外不变
-    expect(result.code.replace(/ data-jiesu-src="[^"]*"/g, '')).toBe(code);
+    expect(
+      result.code
+        .replace(/ data-jiesu-src="[^"]*"/g, '')
+        .replace(/ data-jiesu-id="[^"]*"/g, ''),
+    ).toBe(code);
   });
 
   it('组件标签、自闭合标签都能定位', () => {
@@ -41,6 +49,40 @@ describe('S1 · 编译期注入', () => {
     expect(result.injected).toBe(2);
     expect(result.code).toContain('<Foo.Bar data-jiesu-src="src/a.tsx:1:10"');
     expect(result.code).toContain('<br data-jiesu-src="src/a.tsx:2:10"');
+  });
+
+  it('结构锚点不随行号漂移：插入一行后 id 不变，行号变了', () => {
+    const before = `export function Card() {
+  return (
+    <div className="p-4">
+      <h2>标题</h2>
+    </div>
+  );
+}
+`;
+    const after = `// 新增一行注释
+export function Card() {
+  return (
+    <div className="p-4">
+      <h2>标题</h2>
+    </div>
+  );
+}
+`;
+    const a = injectSourceAttribute(before, { filePath: '/proj/src/Card.tsx', rootDir: '/proj' });
+    const b = injectSourceAttribute(after, { filePath: '/proj/src/Card.tsx', rootDir: '/proj' });
+
+    const idOf = (code: string, tag: string): string =>
+      code.match(new RegExp(`<${tag}[^>]*`))?.[0].match(/data-jiesu-id="([^"]*)"/)?.[1] ?? '';
+    const srcOf = (code: string, tag: string): string =>
+      code.match(new RegExp(`<${tag}[^>]*`))?.[0].match(/data-jiesu-src="([^"]*)"/)?.[1] ?? '';
+
+    // 结构锚点完全不变
+    expect(idOf(b.code, 'h2')).toBe(idOf(a.code, 'h2'));
+    expect(idOf(b.code, 'h2')).toBe('src/Card.tsx#0.0');
+    // 行号漂移了 —— 这正是需要结构锚点的原因
+    expect(srcOf(a.code, 'h2')).toBe('src/Card.tsx:4:6');
+    expect(srcOf(b.code, 'h2')).toBe('src/Card.tsx:5:6');
   });
 
   it('JSX 已被编译时报告 tooLate（提示插件顺序）', () => {
@@ -65,11 +107,12 @@ describe('S1 · Vite 真实管线', () => {
       });
       try {
         const result = await server.transformRequest('/src/Card.tsx');
-        expect(result?.code).toBeDefined();
-        expect(result!.code).toContain('"data-jiesu-src": "src/Card.tsx:3:4"');
-        expect(result!.code).toContain('"data-jiesu-src": "src/Card.tsx:4:6"');
-        // React 插件照常工作（JSX 已被编译）
-        expect(result!.code).toContain('jsxDEV');
+      expect(result?.code).toBeDefined();
+      expect(result!.code).toContain('"data-jiesu-src": "src/Card.tsx:3:4"');
+      expect(result!.code).toContain('"data-jiesu-src": "src/Card.tsx:4:6"');
+      expect(result!.code).toContain('"data-jiesu-id": "src/Card.tsx#0"');
+      // React 插件照常工作（JSX 已被编译）
+      expect(result!.code).toContain('jsxDEV');
       } finally {
         await server.close();
       }
@@ -94,6 +137,7 @@ describe('S1 · Vite 真实管线', () => {
         .join('\n');
       expect(bundled.length).toBeGreaterThan(0);
       expect(bundled).not.toContain('data-jiesu-src');
+      expect(bundled).not.toContain('data-jiesu-id');
     },
     120_000,
   );

@@ -1,6 +1,6 @@
-import type { File, JSXElement } from '@babel/types';
+import type { JSXElement } from '@babel/types';
 
-import { findJsxElement, parseSource, type ElementLocator } from '../locate/parse.js';
+import { anchorOf, findJsxElement, parseSource, type ElementLocator } from '../locate/parse.js';
 import { getClassNameTarget } from '../write/classname-target.js';
 import { parseClass } from '../write/tailwind-classes.js';
 import { pxToSpacingScale } from '../write/units.js';
@@ -41,6 +41,8 @@ export interface LayoutResult {
   matched?: number;
   /** 与原文件的行级差异 */
   diff?: FileDiff;
+  /** 写回后元素的新结构锚点 */
+  anchor?: string;
 }
 
 /* ------------------------------------------------------------------ *
@@ -179,19 +181,18 @@ export function applyLayoutOp(
   op: LayoutOp,
   parentContext?: LayoutContext,
 ): LayoutResult {
-  const ast: File = parseSource(code);
+  const ast = parseSource(code);
   const located = findJsxElement(ast, locator);
   if (!located.ok) {
     return { status: 'not-found', reason: located.reason, changed: false };
   }
   const el = located.element;
+  const anchor = anchorOf(located.path);
 
   /* ---------- 子项重排（结构级操作） ---------- */
   if (op.kind === 'childOrder') {
-    const parent: JSXElement | null = located.parent;
-    if (!parent) {
-      return { status: 'unresolved', reason: '该元素没有可重排的子项', changed: false };
-    }
+    // 重排的是**选中元素自己**的子项
+    const container: JSXElement = located.jsx;
     const req = checkRequirements(
       { display: 'other', isFlexContainer: false, isGridContainer: false, hasLayoutClasses: false },
       { parent: 'flex' },
@@ -201,7 +202,7 @@ export function applyLayoutOp(
       return { status: 'unresolved', reason: req.reason, changed: false };
     }
 
-    const result = reorderJsxChildren(code, parent, op.to);
+    const result = reorderJsxChildren(code, container, op.to);
     if (!result.ok) {
       return { status: 'unresolved', reason: result.reason, changed: false };
     }
@@ -224,6 +225,7 @@ export function applyLayoutOp(
       family: 'childOrder',
       matched: result.itemCount,
       diff: computeDiff(code, updated),
+      anchor,
     };
   }
 
@@ -323,7 +325,7 @@ export function applyLayoutOp(
   }
 
   if (updated === code) {
-    return { status: 'ok', changed: false, family: request.family.name, matched };
+    return { status: 'ok', changed: false, family: request.family.name, matched, anchor };
   }
 
   // 安全闸：绝不允许产出绝对定位
@@ -343,5 +345,6 @@ export function applyLayoutOp(
     family: request.family.name,
     matched,
     diff: computeDiff(code, updated),
+    anchor,
   };
 }

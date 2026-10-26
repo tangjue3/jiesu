@@ -15,6 +15,13 @@ export class EditError extends Error {
   }
 }
 
+/** 一次写回的完整结果。 */
+export interface ApplyOutcome {
+  record: ChangeRecord;
+  /** 写回后元素的新结构锚点 */
+  anchor?: string;
+}
+
 /**
  * 编辑会话：负责把一次可视化操作落到磁盘上，并维护可撤销的变更历史。
  *
@@ -44,7 +51,7 @@ export class EditSession {
     locator: ElementLocator,
     op: StyleOp,
     summary: string,
-  ): ChangeRecord {
+  ): ApplyOutcome {
     return this.applyChange(locator, op, summary, 'style');
   }
 
@@ -52,7 +59,7 @@ export class EditSession {
     locator: ElementLocator,
     op: LayoutOp,
     summary: string,
-  ): ChangeRecord {
+  ): ApplyOutcome {
     return this.applyChange(locator, op, summary, 'layout');
   }
 
@@ -61,7 +68,7 @@ export class EditSession {
     op: StyleOp | LayoutOp,
     summary: string,
     kind: 'style' | 'layout',
-  ): ChangeRecord {
+  ): ApplyOutcome {
     const absPath = this.resolvePath(locator.filePath);
     if (!existsSync(absPath)) {
       throw new EditError('源文件不存在', locator.filePath);
@@ -99,10 +106,10 @@ export class EditSession {
       after: afterFragment,
       diff,
       createdAt: Date.now(),
-      locator,
+      locator: { ...locator, anchor: result.anchor ?? locator.anchor },
     };
     this.changes.push(record);
-    return record;
+    return { record, anchor: result.anchor };
   }
 
   /** 撤销一条变更：把 after 片段换回 before。 */

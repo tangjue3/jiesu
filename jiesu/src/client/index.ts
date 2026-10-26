@@ -6,6 +6,7 @@ import {
 } from '../core/inspect/editable-props.js';
 import { classToPx } from '../core/inspect/tw-px.js';
 import type { ChangeRecord, ClientMessage, ElementLocator, ServerMessage } from '../server/protocol.js';
+import { findByFingerprint, fingerprintOf, type ElementFingerprint } from './fingerprint.js';
 
 /* ------------------------------------------------------------------ *
  * 覆盖层 UI
@@ -54,6 +55,8 @@ interface Selected {
   element: HTMLElement;
   locator: ElementLocator;
   props: EditableProp[];
+  /** 指纹：HMR 重渲染后据此找回同一个元素 */
+  fingerprint: ElementFingerprint;
 }
 
 class JiesuOverlay {
@@ -131,8 +134,16 @@ class JiesuOverlay {
         this.changes.push(message.payload.change);
         this.renderBasket();
         this.showToast(`已应用：${message.payload.change.summary}`);
-        break;
-      case 'changeUndone':
+        // 写回会触发 HMR → DOM 重建。等 Vite 推送新模块后重新绑定选中态。
+        // 新锚点由服务端回传：写回改变了文件内容，行号已漂移。
+        if (message.payload.anchor && this.selected) {
+          this.selected.locator = {
+            ...this.selected.locator,
+            anchor: message.payload.anchor,
+          };
+        }
+        this.syncSelection();
+        break;      case 'changeUndone':
         this.changes = this.changes.filter((c) => c.id !== message.payload.changeId);
         this.renderBasket();
         break;
@@ -196,11 +207,26 @@ class JiesuOverlay {
       return;
     }
 
-    const locator = parseSourceAttr(src);
+    const locator = parseElementLocator(target);
+    if (!locator) {
+      this.showToast('该元素没有源码位置信息，无法编辑', true);
+      return;
+    }
     const props = resolveEditableProps(target.className.split(/\s+/).filter(Boolean));
-    this.selected = { element: target, locator, props };
+    this.selected = {
+      element: target,
+      locator,
+      props,
+      fingerprint: fingerprintOf(target),
+    };
 
-    const rect = target.getBoundingClientRect();
+    this.paintSelection(target);
+    this.renderPanel();
+  };
+
+  /** 绘制选中高亮框与标签。 */
+  private paintSelection(element: HTMLElement): void {
+    const rect = element.getBoundingClientRect();
     this.hl.classList.add('sel');
     this.hl.style.display = 'block';
     this.hl.style.left = `${rect.left}px`;
@@ -211,9 +237,8 @@ class JiesuOverlay {
     this.tag.style.display = 'block';
     this.tag.style.left = `${rect.left}px`;
     this.tag.style.top = `${Math.max(0, rect.top - 20)}px`;
-    this.tag.textContent = shortSrc(src);
-
-    this.renderPanel();
+    const src = element.getAttribute('data-jiesu-src');
+    this.tag.textContent = src ? shortSrc(src) : `${element.tagName.toLowerCase()}（无法定位源码）`;
   };
 
   private onKeyDown = (event: KeyboardEvent): void => {
@@ -228,6 +253,133 @@ class JiesuOverlay {
       this.toggleSelecting();
     }
   };
+
+  /* ---------------- HMR 后重新绑定选中态 ---------------- */
+
+  /**
+   * 写回代码 → Vite HMR → React 重渲染。此时：
+   *  - DOM 节点可能被替换（React 重建了它），也可能被复用但 class 变了
+   *  - 元素在源码里的行号也漂移了
+   *
+   * 所以写回后不能直接用旧的 element 引用，必须等 DOM 稳定后重新同步。
+   */
+  private syncTimer: number | null = null;
+
+  /**
+   * 同步选中态与当前 DOM。
+   *
+   * HMR 是异步链路（写文件 → vite 编译 → 推模块 → react 重渲染），
+   * 立刻去找元素会扑空；等太久又会让面板显示过期数值。
+   * 所以采用「轮询等待变化」：检测到 class 变化或节点被替换才算稳定。
+   */
+  private syncSelection(): void {
+    if (this.syncTimer !== null) {
+      window.clearTimeout(this.syncTimer);
+      this.syncTimer = null;
+    }
+    if (!this.selected) return;
+
+    const baselineClass = this.selected.element.className;
+    const delays = [60, 120, 250, 400, 700, 1200];
+    let attempt = 0;
+
+    const attemptSync = (): void => {
+      if (!this.selected) return;
+      const element = this.selected.element;
+
+      // 情况 A：节点被替换 → 用指纹找回同一个元素
+      if (!element.isConnected) {
+        const match = findByFingerprint(document, this.selected.fingerprint);
+        if (match) {
+          this.adoptElement(match.element);
+          return;
+        }
+        if (attempt < delays.length) {
+          this.syncTimer = window.setTimeout(attemptSync, delays[attempt]);
+          attempt += 1;
+          return;
+        }
+        // 反复找不到 → 明确告知，而不是留一个指向死节点的选中态
+        this.closePanel();
+        this.showToast('该元素已不存在（代码可能已被重构），请重新选择', true);
+        return;
+      }
+
+      // 情况 B：节点还在但 class 变了 → 内容已更新，刷新面板
+      if (element.className !== baselineClass) {
+        this.refreshSelectionState();
+        return;
+      }
+
+      // 情况 C：还没变化 → 继续等
+      if (attempt < delays.length) {
+        this.syncTimer = window.setTimeout(attemptSync, delays[attempt]);
+        attempt += 1;
+        return;
+      }
+
+      // 超时：这次 HMR 没影响该元素（或改的是文本）→ 仍然同步一次
+      this.refreshSelectionState();
+    };
+
+    this.syncTimer = window.setTimeout(attemptSync, delays[0]);
+  }
+
+  /** 接管一个新找到的元素（节点被替换后）。 */
+  private adoptElement(element: HTMLElement): void {
+    if (!this.selected) return;
+    const locator = parseElementLocator(element);
+    this.selected = {
+      element,
+      locator: locator ?? this.selected.locator,
+      props: resolveEditableProps(element.className.split(/\s+/).filter(Boolean)),
+      fingerprint: fingerprintOf(element),
+    };
+    this.paintSelection(element);
+    this.renderPanel();
+  }
+
+  /**
+   * 刷新选中态的派生数据（class 变了 → 属性列表与当前值要变）。
+   *
+   * 注意：只更新数值，不重建整个面板——重建会打断用户正在进行的输入。
+   */
+  private refreshSelectionState(): void {
+    if (!this.selected) return;
+    const element = this.selected.element;
+    const locator = parseElementLocator(element);
+    this.selected = {
+      element,
+      locator: locator ?? this.selected.locator,
+      props: resolveEditableProps(element.className.split(/\s+/).filter(Boolean)),
+      fingerprint: fingerprintOf(element),
+    };
+    this.paintSelection(element);
+    this.updatePanelValues();
+  }
+
+  /**
+   * MutationObserver：捕获用户手动改代码触发的 HMR。
+   * 写回触发的 HMR 由 syncSelection 主动处理，这里只作兜底。
+   */
+  private observer: MutationObserver | null = null;
+  private observerScheduled = false;
+
+  private ensureObserver(): void {
+    if (this.observer || typeof MutationObserver === 'undefined') return;
+    this.observer = new MutationObserver(() => {
+      if (!this.selected || this.observerScheduled) return;
+      this.observerScheduled = true;
+      // 让 React 先把新 DOM 挂上去，再同步
+      setTimeout(() => {
+        this.observerScheduled = false;
+        this.syncSelection();
+      }, 0);
+    });
+    // 脚本注入在 <head>，此时 body 可能还不存在 → 等 DOM 就绪再观察
+    const target = document.body ?? document.documentElement;
+    this.observer.observe(target, { childList: true, subtree: true });
+  }
 
   /* ---------------- 面板 ---------------- */
 
@@ -316,6 +468,44 @@ class JiesuOverlay {
     return el;
   }
 
+  /**
+   * HMR 之后刷新面板上的数值。
+   *
+   * 只改数值，不重建面板 DOM——重建会清空用户正在输入的内容。
+   * 找不到对应行（属性本身变了）才重建。
+   */
+  private updatePanelValues(): void {
+    if (!this.selected) return;
+    const props = this.selected.props;
+
+    const numberInputs = Array.from(
+      this.panel.querySelectorAll<HTMLInputElement>('.jd-row input[type=number]'),
+    );
+    for (const input of numberInputs) {
+      const key = input.dataset.jdProp;
+      if (!key) continue;
+      const prop = props.find((p) => p.key === key);
+      if (!prop) continue;
+      const px = classToPx(prop.base ?? '') ?? this.computedLength(prop);
+      const next = px === null ? '' : String(px);
+      // 用户正在编辑这个输入框 → 不覆盖
+      if (document.activeElement !== input && input.value !== next) {
+        input.value = next;
+      }
+    }
+
+    const selects = Array.from(this.panel.querySelectorAll<HTMLSelectElement>('.jd-row select'));
+    for (const select of selects) {
+      const key = select.dataset.jdProp;
+      if (!key) continue;
+      const prop = props.find((p) => p.key === key);
+      if (!prop?.base) continue;
+      if (select.value !== prop.base && document.activeElement !== select) {
+        select.value = prop.base;
+      }
+    }
+  }
+
   private lengthRow(prop: EditableProp): HTMLElement {
     const row = document.createElement('div');
     row.className = 'jd-row';
@@ -327,9 +517,13 @@ class JiesuOverlay {
     // 当前值优先从 class 反推（代码是真实来源）；class 推不出时才退回 computed style
     const computed = classToPx(prop.base ?? '') ?? this.computedLength(prop);
     input.value = computed === null ? '' : String(computed);
+    // 标记：HMR 刷新时按属性标识回填数值
+    input.dataset.jdProp = prop.key;
     input.onchange = () => {
       const toPx = Number(input.value);
-      const fromPx = computed;
+      // 当前值必须在**提交这一刻**从代码里读，不能用渲染时捕获的值：
+      // HMR 之后代码里的类名已经变了，用旧值会算错 fromPx。
+      const fromPx = this.currentPxOf(prop.key);
       if (!Number.isFinite(toPx) || fromPx === null) {
         this.showToast('无法读取当前数值，改用固定类名替换', true);
         return;
@@ -350,12 +544,29 @@ class JiesuOverlay {
     return row;
   }
 
+  /**
+   * 读取某个属性在**当前代码**里的 px 值。
+   *
+   * 从 DOM 的 class 反推（代码是唯一真实来源），而不是用面板缓存的旧值——
+   * 否则 HMR 之后会拿着过期的 fromPx 去改写，导致匹配失败。
+   */
+  private currentPxOf(propKey: string): number | null {
+    if (!this.selected) return null;
+    const prop = this.selected.props.find((p) => p.key === propKey);
+    if (!prop) return null;
+    const tokens = this.selected.element.className.split(/\s+/).filter(Boolean);
+    const live = resolveEditableProps(tokens).find((p) => p.key === propKey);
+    const base = live?.base ?? prop.base;
+    return classToPx(base ?? '') ?? this.computedLength(prop);
+  }
+
   private selectRow(prop: EditableProp, options: string[]): HTMLElement {
     const row = document.createElement('div');
     row.className = 'jd-row';
     const label = document.createElement('label');
     label.textContent = prop.label;
     const select = document.createElement('select');
+    select.dataset.jdProp = prop.key;
     for (const option of options) {
       const opt = document.createElement('option');
       opt.value = option;
@@ -365,24 +576,31 @@ class JiesuOverlay {
     }
     select.onchange = () => {
       const to = select.value;
+      // 当前基础类名从**当前代码**读，不用渲染时捕获的值（HMR 后可能已变）
+      const from = this.currentBaseOf(prop.key) ?? prop.base;
       if (prop.key === 'flex-direction') {
-        this.requestChange(
-          { kind: 'flexDirection', to },
-          `排列方向 ${prop.base} → ${to}`,
-        );
+        this.requestChange({ kind: 'flexDirection', to }, `排列方向 ${from} → ${to}`);
       } else if (prop.key === 'align-items') {
-        this.requestChange({ kind: 'alignItems', to }, `对齐 ${prop.base} → ${to}`);
+        this.requestChange({ kind: 'alignItems', to }, `对齐 ${from} → ${to}`);
       } else if (prop.key === 'justify-content') {
-        this.requestChange({ kind: 'justifyContent', to }, `分布 ${prop.base} → ${to}`);
+        this.requestChange({ kind: 'justifyContent', to }, `分布 ${from} → ${to}`);
       } else if (prop.key === 'font-size') {
         this.requestChange(
-          { kind: 'class', category: 'fontSize', fromBase: prop.base!, toBase: to },
-          `字号 ${prop.base} → ${to}`,
+          { kind: 'class', category: 'fontSize', fromBase: from!, toBase: to },
+          `字号 ${from} → ${to}`,
         );
       }
     };
     row.append(label, select);
     return row;
+  }
+
+  /** 读取某个属性在**当前代码**里的基础类名。 */
+  private currentBaseOf(propKey: string): string | undefined {
+    if (!this.selected) return undefined;
+    const tokens = this.selected.element.className.split(/\s+/).filter(Boolean);
+    const live = resolveEditableProps(tokens).find((p) => p.key === propKey);
+    return live?.base ?? this.selected.props.find((p) => p.key === propKey)?.base;
   }
 
   private colorRow(prop: EditableProp): HTMLElement {
@@ -401,9 +619,10 @@ class JiesuOverlay {
       button.style.background = CSS_COLOR[candidate] ?? '#cbd5e1';
       if (candidate === prop.base) button.classList.add('on');
       button.onclick = () => {
+        const from = this.currentBaseOf(prop.key) ?? prop.base;
         this.requestChange(
-          { kind: 'class', category: 'color', fromBase: prop.base!, toBase: candidate },
-          `${prop.label} ${prop.base} → ${candidate}`,
+          { kind: 'class', category: 'color', fromBase: from!, toBase: candidate },
+          `${prop.label} ${from} → ${candidate}`,
         );
       };
       swatches.appendChild(button);
@@ -419,8 +638,9 @@ class JiesuOverlay {
         return;
       }
       const arbitrary = `${prop.key === 'color' ? 'text' : 'bg'}-[${value}]`;
+      const from = this.currentBaseOf(prop.key) ?? prop.base;
       this.requestChange(
-        { kind: 'class', category: 'color', fromBase: prop.base!, toBase: arbitrary },
+        { kind: 'class', category: 'color', fromBase: from!, toBase: arbitrary },
         `${prop.label} → ${value}`,
       );
     };
@@ -555,6 +775,7 @@ class JiesuOverlay {
     document.addEventListener('mousemove', this.onMouseMove, true);
     document.addEventListener('click', this.onClick, true);
     document.addEventListener('keydown', this.onKeyDown, true);
+    this.ensureObserver();
   }
 }
 
@@ -581,6 +802,32 @@ function parseSourceAttr(src: string): ElementLocator {
     line: Number(src.slice(secondLast + 1, lastColon)),
     column: Number(src.slice(lastColon + 1)),
   };
+}
+
+/**
+ * 从 DOM 属性解析定位信息。
+ *
+ * 优先读 data-jiesu-id（形如 `src/App.tsx#0.1`）——它同时包含文件路径、
+ * 行号列号与结构锚点，信息最全；读不到再退回 data-jiesu-src。
+ */
+function parseElementLocator(element: HTMLElement): ElementLocator | null {
+  const id = element.getAttribute('data-jiesu-id');
+  if (id) {
+    const hashIndex = id.lastIndexOf('#');
+    if (hashIndex > 0) {
+      const filePath = id.slice(0, hashIndex);
+      const anchor = id.slice(hashIndex + 1);
+      // id 里不含行列，行列仍从 data-jiesu-src 取
+      const src = element.getAttribute('data-jiesu-src');
+      const base = src ? parseSourceAttr(src) : null;
+      if (base) {
+        return { ...base, filePath, anchor };
+      }
+      return { filePath, line: 0, column: 0, anchor };
+    }
+  }
+  const src = element.getAttribute('data-jiesu-src');
+  return src ? parseSourceAttr(src) : null;
 }
 
 function shortSrc(src: string): string {

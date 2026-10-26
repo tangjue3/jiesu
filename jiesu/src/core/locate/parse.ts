@@ -1,116 +1,107 @@
-import { parse as babelParse } from '@babel/parser';
-import type { File, JSXElement, JSXOpeningElement } from '@babel/types';
+import type { JSXElement, JSXOpeningElement } from '@babel/types';
 
-/** 元素在源码中的位置。字段与 babel 注入的 `__source` 一致（line 1-based，column 0-based）。 */
+import { collectJsxTree, pathToAnchor, type JsxTreeEntry } from './jsx-tree.js';
+
+/**
+ * 元素在源码中的位置。
+ *
+ * 两个锚点：
+ *  - line/column 精确锚点：编译期注入的 data-jiesu-src，精确但**会漂移**
+ *  - anchor 结构锚点：JSX 层级路径，**不漂移**但结构变了就失效
+ *
+ * 两者交叉使用：任何一个单独用都会出错，合起来才能既防漂移又防误伤。
+ */
 export interface ElementLocator {
   filePath: string;
   line: number;
   column: number;
+  /** 结构锚点，如 "0.1" */
+  anchor?: string;
 }
 
-export interface RecastParser {
-  parse: (source: string) => File;
-}
+/** 一个文件的 JSX 元素集合。 */
+export type JsxTree = JsxTreeEntry[];
 
 /**
  * 统一解析入口：TS + TSX，容错模式。
- * 用 @babel/parser 直接喂给 recast，避免依赖 recast/parsers/typescript 的类型声明。
+ * 只收集 JSX 元素，不保留整棵 AST —— 我们需要的只是元素、它的父节点和路径。
  */
-export const tsxParser: RecastParser = {
-  parse(source: string) {
-    return babelParse(source, {
-      sourceType: 'unambiguous',
-      errorRecovery: true,
-      plugins: ['typescript', 'jsx'],
-    });
-  },
-};
-
-export function parseSource(code: string): File {
-  return tsxParser.parse(code);
-}
-
-/** 收集文件里所有 JSX 开始标签（自闭合标签也在内）。 */
-export function collectJsxElements(ast: File): JSXOpeningElement[] {
-  const out: JSXOpeningElement[] = [];
-  const visit = (node: unknown): void => {
-    if (!node || typeof node !== 'object') return;
-    const n = node as { type?: string; loc?: { start?: { line?: number; column?: number } } };
-    if (n.type === 'JSXOpeningElement' && n.loc?.start) {
-      out.push(node as JSXOpeningElement);
-    }
-    for (const key of Object.keys(node as object)) {
-      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
-      const child = (node as Record<string, unknown>)[key];
-      if (Array.isArray(child)) child.forEach(visit);
-      else if (child && typeof child === 'object') visit(child);
-    }
-  };
-  visit(ast);
-  return out;
+export function parseSource(code: string): JsxTree {
+  return collectJsxTree(code);
 }
 
 export type LocateResult =
-  | { ok: true; element: JSXOpeningElement; parent: JSXElement | null; matchedBy: 'exact' | 'line' }
+  | {
+      ok: true;
+      element: JSXOpeningElement;
+      /** 元素本体（改文本时要用它的 children） */
+      jsx: JSXElement;
+      parent: JSXElement | null;
+      /** 命中的元素在 JSX 树中的路径 */
+      path: JsxTreeEntry['path'];
+      matchedBy: 'exact' | 'line' | 'anchor';
+    }
   | { ok: false; reason: string };
-
-/** 收集所有 JSX 开始标签，并记录其所属的 JSXElement 父节点（改文本时需要）。 */
-function collectJsxWithParent(ast: File): Array<{
-  element: JSXOpeningElement;
-  parent: JSXElement | null;
-}> {
-  const out: Array<{ element: JSXOpeningElement; parent: JSXElement | null }> = [];
-
-  const visit = (node: unknown, parent: JSXElement | null): void => {
-    if (!node || typeof node !== 'object') return;
-    const n = node as { type?: string };
-    if (n.type === 'JSXElement') {
-      const jsxEl = node as JSXElement;
-      const opening = jsxEl.openingElement;
-      if (opening?.loc?.start) out.push({ element: opening, parent: jsxEl });
-    }
-    for (const key of Object.keys(node as object)) {
-      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
-      const child = (node as Record<string, unknown>)[key];
-      if (Array.isArray(child)) child.forEach((c) => visit(c, n.type === 'JSXElement' ? (node as JSXElement) : parent));
-      else if (child && typeof child === 'object') {
-        visit(child, n.type === 'JSXElement' ? (node as JSXElement) : parent);
-      }
-    }
-  };
-
-  visit(ast, null);
-  return out;
-}
 
 /**
  * 按位置找到 JSX 元素。
- * 优先精确匹配 line+column；失败时退化为"同一行唯一元素"——真实场景中行级定位已足够，
- * 且比要求列号完全一致更抗编译器差异。
+ *
+ * 定位策略（按可靠性排序）：
+ *  1. **双锚点一致** → 直接命中，最可信
+ *  2. **双锚点冲突** → 该行唯一则采信行号，否则明确拒绝
+ *  3. **只有结构锚点** → 用结构锚点定位（行号已漂移，但结构没变）
+ *  4. **只有行号** → 退化为"同一行唯一元素"
+ *  5. 都不行 → 明确拒绝
+ *
+ * 关键纪律：**绝不"猜"**。宁可让用户重新点一次，也不改错元素。
  */
-export function findJsxElement(ast: File, locator: ElementLocator): LocateResult {
-  const hits = collectJsxWithParent(ast);
-  if (hits.length === 0) return { ok: false, reason: '文件中没有 JSX 元素' };
+export function findJsxElement(tree: JsxTree, locator: ElementLocator): LocateResult {
+  if (tree.length === 0) return { ok: false, reason: '文件中没有 JSX 元素' };
 
-  const startOf = (el: JSXOpeningElement) => el.loc?.start;
-
-  const exact = hits.find(
-    (h) => startOf(h.element)?.line === locator.line && startOf(h.element)?.column === locator.column,
+  const byAnchor = locator.anchor
+    ? tree.find((entry) => pathToAnchor(entry.path) === locator.anchor)
+    : undefined;
+  const byLine = tree.find(
+    (entry) => entry.line === locator.line && entry.column === locator.column,
   );
-  if (exact) return { ok: true, element: exact.element, parent: exact.parent, matchedBy: 'exact' };
-
-  // 容错：列号差 1（不同工具的 0/1-based 差异）
-  const near = hits.find(
-    (h) =>
-      startOf(h.element)?.line === locator.line &&
-      Math.abs((startOf(h.element)?.column ?? -99) - locator.column) === 1,
+  const nearLine = tree.find(
+    (entry) => entry.line === locator.line && Math.abs(entry.column - locator.column) === 1,
   );
-  if (near) return { ok: true, element: near.element, parent: near.parent, matchedBy: 'exact' };
+  const sameLine = tree.filter((entry) => entry.line === locator.line);
 
-  const sameLine = hits.filter((h) => startOf(h.element)?.line === locator.line);
-  if (sameLine.length === 1) {
-    return { ok: true, element: sameLine[0].element, parent: sameLine[0].parent, matchedBy: 'line' };
+  const toResult = (
+    entry: JsxTreeEntry,
+    matchedBy: 'exact' | 'line' | 'anchor',
+  ): LocateResult => ({
+    ok: true,
+    element: entry.opening,
+    jsx: entry.element,
+    parent: entry.parent,
+    path: entry.path,
+    matchedBy,
+  });
+
+  // 1. 双锚点都存在且指向同一个元素 → 最可信
+  if (byAnchor && byLine && byAnchor === byLine) return toResult(byAnchor, 'exact');
+
+  // 2. 双锚点都存在但指向不同元素 → 文件结构变了，行号不再可信
+  if (byAnchor && byLine && byAnchor !== byLine) {
+    // 结构锚点可能因为用户真的移动了元素而失效；
+    // 若行号锚点仍然精确匹配且该行只有一个元素，可以安全采用。
+    if (sameLine.length === 1) return toResult(byLine, 'exact');
+    return {
+      ok: false,
+      reason: '元素位置已变化（结构锚点与行号不一致），请重新选择该元素',
+    };
   }
+
+  // 3. 有结构锚点 → 用它（行号漂移场景）
+  if (byAnchor) return toResult(byAnchor, 'anchor');
+
+  // 4. 只有行号
+  if (byLine) return toResult(byLine, 'exact');
+  if (nearLine) return toResult(nearLine, 'exact');
+  if (sameLine.length === 1) return toResult(sameLine[0], 'line');
 
   if (sameLine.length > 1) {
     return {
@@ -119,4 +110,9 @@ export function findJsxElement(ast: File, locator: ElementLocator): LocateResult
     };
   }
   return { ok: false, reason: `第 ${locator.line} 行没有找到 JSX 元素` };
+}
+
+/** 结构锚点字符串。 */
+export function anchorOf(path: JsxTreeEntry['path']): string {
+  return pathToAnchor(path);
 }

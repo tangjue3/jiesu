@@ -7,6 +7,11 @@ export interface ElementLocator {
   filePath: string;
   line: number;
   column: number;
+  /**
+   * 结构锚点（如 "0.1"）：JSX 层级路径。
+   * 行号会因写回而漂移，结构锚点不会——两者交叉校验才能既防漂移又防改错元素。
+   */
+  anchor?: string;
 }
 
 /** 一条已应用的变更。 */
@@ -42,7 +47,17 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { type: 'ready'; payload: { projectRoot: string; clientCount: number } }
-  | { type: 'changeApplied'; payload: { change: ChangeRecord } }
+  | {
+      type: 'changeApplied';
+      payload: {
+        change: ChangeRecord;
+        /**
+         * 写回后元素的新结构锚点。
+         * 写回会改变文件内容 → 行号漂移 → 客户端靠新锚点重新定位。
+         */
+        anchor?: string;
+      };
+    }
   | { type: 'changeUndone'; payload: { changeId: string } }
   | { type: 'history'; payload: { changes: ChangeRecord[] } }
   | { type: 'error'; payload: { message: string; detail?: string } }

@@ -135,10 +135,13 @@ function handleMessage(
 
     case 'requestChange': {
       const { locator, op, summary } = message.payload;
-      const record = isLayoutOp(op)
+      const outcome = isLayoutOp(op)
         ? session.applyLayoutChange(locator, op, summary)
         : session.applyStyleChange(locator, op as StyleOp, summary);
-      broadcast({ type: 'changeApplied', payload: { change: record } });
+      broadcast({
+        type: 'changeApplied',
+        payload: { change: outcome.record, anchor: outcome.anchor },
+      });
       return;
     }
 
