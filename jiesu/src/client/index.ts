@@ -1732,27 +1732,38 @@ class JiesuOverlay {
   /**
    * 结构编辑后接管"接下来该选中谁"。
    *
-   * 为什么是找 DOM 而不是接着用旧锚点：
-   * 插入会让新元素占走原来的同级索引，旧锚点 + 旧行号会**一致地**指向新元素，
-   * 交叉校验也拦不住（S5 实测）。所以由服务端算好目标，客户端只负责等它出现。
+   * 这里有两个必须同时满足的门槛，缺一个就会选错元素：
+   *
+   *  ① **等 HMR 真的重建了 DOM**（一次结构性变动）。
+   *     插入会让同级索引整体后移：新节点占走 0.0.2.1，原来的"第二块"被挤到 0.0.2.2。
+   *     而在这之前，DOM 上的 0.0.2.1 还是"第二块"——按锚点直接查会立刻命中**旧元素**，
+   *     于是锁定被提前解开，用户接着的编辑就打在别人身上。
+   *     （这不是理论：v05 端到端第一次就是栽在这里。）
+   *
+   *  ② **锚点 + 源码行列双匹配**。服务端知道新节点在新文件里的确切位置，
+   *     两者都吻合才算找到了它；只有锚点吻合说明 DOM 还是旧的。
    */
   private awaitStructureSelect(
     select: { anchor: string; line: number; column: number },
     filePath: string,
   ): void {
     const targetId = `${filePath}#${select.anchor}`;
+    const expectSrc = select.line > 0 ? `${filePath}:${select.line}:${select.column}` : null;
     const previous = this.selected?.element;
     const previousRect = previous?.isConnected ? previous.getBoundingClientRect() : null;
 
-    const delays = [60, 120, 200, 320, 500, 800, 1200];
+    const delays = [40, 80, 120, 200, 320, 500, 800];
     let attempt = 0;
 
     const tryFind = (): void => {
       this.structurePoll = null;
 
-      const matches = Array.from(
+      const byId = Array.from(
         document.querySelectorAll<HTMLElement>(`[data-jiesu-id="${escapeAttrValue(targetId)}"]`),
       );
+      const matches = expectSrc
+        ? byId.filter((element) => element.getAttribute('data-jiesu-src') === expectSrc)
+        : byId;
 
       if (matches.length > 0) {
         this.selectElement(pickNearest(matches, previousRect));
@@ -1766,15 +1777,49 @@ class JiesuOverlay {
         return;
       }
 
-      // 明确失败，而不是留一个指向旧位置（可能已被别的元素占用）的选中态
+      // 明确失败，而不是留一个指向旧位置（很可能已被别的元素占用）的选中态
       this.endStructureEdit();
       this.showToast(
-        '结构改动已写入代码，但页面上没找到目标元素（可能被条件渲染挡住）',
+        '结构改动已写入代码，但页面还没更新到位（可能被条件渲染挡住），请重新选择',
         true,
       );
     };
 
-    this.structurePoll = window.setTimeout(tryFind, delays[0]);
+    // 先等一次结构性变动（React 重渲染会重建节点），再开始按位置找
+    this.waitForStructuralMutation(5000).then((mutated) => {
+      if (!this.structureBusy) return;
+      if (!mutated) {
+        // 没有任何结构变动：可能改动没生效，也可能这次编辑不影响 DOM
+        tryFind();
+        return;
+      }
+      this.structurePoll = window.setTimeout(tryFind, delays[0]);
+    });
+  }
+
+  /** 等到一次 childList 变动（= React 重建了节点）；超时返回 false。 */
+  private waitForStructuralMutation(timeoutMs: number): Promise<boolean> {
+    if (typeof MutationObserver === 'undefined') return Promise.resolve(true);
+    const target = document.body ?? document.documentElement;
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const observer = new MutationObserver((records) => {
+        const structural = records.some(
+          (record) => record.addedNodes.length > 0 || record.removedNodes.length > 0,
+        );
+        if (!structural || done) return;
+        done = true;
+        observer.disconnect();
+        resolve(true);
+      });
+      observer.observe(target, { childList: true, subtree: true });
+      window.setTimeout(() => {
+        if (done) return;
+        done = true;
+        observer.disconnect();
+        resolve(false);
+      }, timeoutMs);
+    });
   }
 
   private armStructureWatchdog(): void {

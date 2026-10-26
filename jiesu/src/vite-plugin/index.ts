@@ -17,6 +17,42 @@ const DEFAULT_INCLUDE = /\.[jt]sx?$/;
 const CLIENT_VIRTUAL_ID = '\0jiesu-client';
 const CLIENT_PUBLIC_ID = '/@id/__x00__jiesu-client';
 
+/** 构建产物里的覆盖层（发布形态）；从 src 跑时不存在，退回现场编译 TS。 */
+const OVERLAY_DIST = new URL('../client/overlay.js', import.meta.url);
+const OVERLAY_SRC = new URL('../client/index.ts', import.meta.url);
+
+let overlayCache: string | null = null;
+
+/**
+ * 取覆盖层脚本。
+ *
+ * 为什么优先读 dist：插件被打包后 `import.meta.url` 落在 `dist/vite-plugin/`，
+ * 那里已经没有 `src/client/index.ts` 可读，现场 buildSync 会直接抛错
+ * （表现是页面白屏、且只有真打开页面才发现）。所以 build.mjs 会预先把
+ * `dist/client/overlay.js` 打好，这里只做读取。
+ */
+function loadOverlayBundle(): string {
+  if (overlayCache !== null) return overlayCache;
+
+  const distPath = OVERLAY_DIST.pathname;
+  if (existsSync(distPath)) {
+    overlayCache = readFileSync(distPath, 'utf8');
+    return overlayCache;
+  }
+
+  const result = buildSync({
+    entryPoints: [OVERLAY_SRC.pathname],
+    bundle: true,
+    write: false,
+    format: 'iife',
+    platform: 'browser',
+    target: 'es2020',
+    logLevel: 'silent',
+  });
+  overlayCache = result.outputFiles[0].text;
+  return overlayCache;
+}
+
 /**
  * jiesu 的 Vite 插件：
  *  1. dev 模式下给每个 JSX 元素注入源码位置属性（data-jiesu-src）
@@ -49,16 +85,7 @@ export function jiesu(options: JiesuPluginOptions = {}): Plugin {
 
     load(id) {
       if (id !== CLIENT_VIRTUAL_ID) return null;
-      const result = buildSync({
-        entryPoints: [new URL('../client/index.ts', import.meta.url).pathname],
-        bundle: true,
-        write: false,
-        format: 'iife',
-        platform: 'browser',
-        target: 'es2020',
-        logLevel: 'silent',
-      });
-      return result.outputFiles[0].text;
+      return loadOverlayBundle();
     },
 
     transformIndexHtml() {
