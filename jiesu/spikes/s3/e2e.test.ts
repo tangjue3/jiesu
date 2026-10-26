@@ -113,6 +113,8 @@ describe('S3 · 端到端：HMR 后不丢选中', () => {
     vite = await createServer({
       root: DEMO,
       logLevel: 'error',
+      // 各 demo 独立缓存目录：多个 e2e 并行跑时会抢同一个 .vite 缓存
+      cacheDir: join(DEMO, '.vite-cache'),
       server: { host: '127.0.0.1', port: 5201, strictPort: true },
     });
     await vite.listen();

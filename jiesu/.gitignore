@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .vite/
+.vite-cache/
+.jiesu/
 *.log
 .DS_Store
 coverage/

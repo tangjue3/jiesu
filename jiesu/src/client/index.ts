@@ -6,6 +6,19 @@ import {
 } from '../core/inspect/editable-props.js';
 import { classToPx } from '../core/inspect/tw-px.js';
 import type { ChangeRecord, ClientMessage, ElementLocator, ServerMessage } from '../server/protocol.js';
+import {
+  dragModeFromDisplay,
+  exceededThreshold,
+  gridIndicator,
+  insertionIndexGrid,
+  insertionIndexLinear,
+  isOutside,
+  linearIndicator,
+  planReorder,
+  type DragMode,
+  type Point,
+  type Rect,
+} from './drag.js';
 import { findByFingerprint, fingerprintOf, type ElementFingerprint } from './fingerprint.js';
 
 /* ------------------------------------------------------------------ *
@@ -28,7 +41,9 @@ const STYLE = `
 .jd-body { flex: 1; overflow-y: auto; padding: 8px 0 16px; }
 .jd-sec { padding: 6px 12px 2px; font-size: 11px; color: #94a3b8; letter-spacing: .04em; }
 .jd-row { padding: 4px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.jd-row label { color: #475569; flex: 1; }
+.jd-row label { color: #475569; flex: 1; white-space: nowrap; }
+.jd-row.stacked { flex-wrap: wrap; }
+.jd-row.stacked > label { flex: 0 0 100%; }
 .jd-row input[type=number], .jd-row input[type=text], .jd-row select { width: 104px; padding: 3px 6px; border: 1px solid rgba(0,0,0,.16); border-radius: 4px; font-size: 12px; }
 .jd-row textarea { width: 100%; padding: 4px 6px; border: 1px solid rgba(0,0,0,.16); border-radius: 4px; font-size: 12px; resize: vertical; }
 .jd-sw { display: flex; gap: 4px; flex-wrap: wrap; }
@@ -47,8 +62,12 @@ const STYLE = `
 .jd-basket .jd-bempty { padding: 10px; color: #94a3b8; }
 .jd-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111827; color: #fff; padding: 8px 14px; border-radius: 6px; pointer-events: none; display: none; max-width: 60vw; }
 .jd-toast.err { background: #b91c1c; }
-.jd-hint { position: fixed; left: 12px; top: 12px; background: rgba(17,24,39,.92); color: #fff; padding: 7px 11px; border-radius: 6px; pointer-events: none; display: none; }
+.jd-hint { position: fixed; left: 50%; transform: translateX(-50%); top: 12px; background: rgba(17,24,39,.92); color: #fff; padding: 7px 11px; border-radius: 6px; pointer-events: none; display: none; }
 .jd-hint.on { display: block; }
+.jd-drop { position: fixed; background: #ea580c; border-radius: 2px; pointer-events: none; display: none; box-shadow: 0 0 0 1px rgba(255,255,255,.85); }
+.jd-drop.bad { background: #94a3b8; }
+.jd-ghost { position: fixed; border: 1.5px dashed #2563eb; background: rgba(37,99,235,.05); border-radius: 4px; pointer-events: none; display: none; }
+.jd-tip { padding: 6px 12px 0; color: #94a3b8; font-size: 11px; line-height: 1.5; }
 `;
 
 interface Selected {
@@ -57,6 +76,18 @@ interface Selected {
   props: EditableProp[];
   /** 指纹：HMR 重渲染后据此找回同一个元素 */
   fingerprint: ElementFingerprint;
+}
+
+/** 一次进行中的拖拽：拖的是"已选中元素在父容器里的位置"。 */
+interface DragContext {
+  container: HTMLElement;
+  /** 父容器的定位（childOrder 作用在容器上，不是被拖的子项） */
+  locator: ElementLocator;
+  items: HTMLElement[];
+  rects: Rect[];
+  containerRect: Rect;
+  mode: DragMode;
+  from: number;
 }
 
 class JiesuOverlay {
@@ -70,12 +101,21 @@ class JiesuOverlay {
   private basketCount!: HTMLSpanElement;
   private toast!: HTMLDivElement;
   private hint!: HTMLDivElement;
+  private drop!: HTMLDivElement;
+  private ghost!: HTMLDivElement;
 
   private ws!: WebSocket;
   private selecting = false;
   private selected: Selected | null = null;
   private changes: ChangeRecord[] = [];
   private basketOpen = false;
+
+  /* 拖拽重排状态 */
+  private pendingDrag: Point | null = null;
+  private drag: DragContext | null = null;
+  private dragInsertAt: number | null = null;
+  /** 拖拽结束后的那次 click 不应再触发"重新选中" */
+  private suppressClick = false;
 
   constructor() {
     this.host = document.createElement('div');
@@ -99,8 +139,14 @@ class JiesuOverlay {
 
     this.hint = document.createElement('div');
     this.hint.className = 'jd-hint';
-    this.hint.textContent = 'jiesu：点击元素进行编辑 · Esc 退出';
+    this.hint.textContent = 'jiesu：点击元素进行编辑 · 拖动已选元素可调整同级顺序 · Esc 退出';
     rootEl.appendChild(this.hint);
+
+    this.drop = document.createElement('div');
+    this.drop.className = 'jd-drop';
+    this.ghost = document.createElement('div');
+    this.ghost.className = 'jd-ghost';
+    rootEl.append(this.drop, this.ghost);
 
     this.buildPanel();
     this.buildBasket();
@@ -135,11 +181,16 @@ class JiesuOverlay {
         this.renderBasket();
         this.showToast(`已应用：${message.payload.change.summary}`);
         // 写回会触发 HMR → DOM 重建。等 Vite 推送新模块后重新绑定选中态。
-        // 新锚点由服务端回传：写回改变了文件内容，行号已漂移。
-        if (message.payload.anchor && this.selected) {
+        // 只有"本次操作的目标就是选中元素"时才采用服务端回传的锚点：
+        // 拖拽重排的目标是父容器，被拖子项的锚点会随位置变化，
+        // 那种情况必须等 HMR 后从 DOM 重新读，不能被容器的锚点覆盖。
+        if (
+          this.selected &&
+          message.payload.change.locator?.anchor === this.selected.locator.anchor
+        ) {
           this.selected.locator = {
             ...this.selected.locator,
-            anchor: message.payload.anchor,
+            anchor: message.payload.anchor ?? this.selected.locator.anchor,
           };
         }
         this.syncSelection();
@@ -173,6 +224,8 @@ class JiesuOverlay {
 
   private onMouseMove = (event: MouseEvent): void => {
     if (!this.selecting) return;
+    // 拖拽中不要画 hover 高亮，否则会和插入指示线打架
+    if (this.drag || this.pendingDrag) return;
     const target = event.target as HTMLElement | null;
     if (!target || target === this.host) return;
     if (this.host.contains(target)) return;
@@ -194,6 +247,13 @@ class JiesuOverlay {
   };
 
   private onClick = (event: MouseEvent): void => {
+    if (this.suppressClick) {
+      // 刚刚结束一次拖拽：这次 click 是拖拽的副产物，不能当成"选中另一个元素"
+      this.suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (!this.selecting) return;
     const target = event.target as HTMLElement | null;
     if (!target || this.host.contains(target)) return;
@@ -243,6 +303,10 @@ class JiesuOverlay {
 
   private onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === 'Escape') {
+      if (this.drag) {
+        this.cancelDrag();
+        return;
+      }
       if (this.selecting) this.toggleSelecting();
       this.closePanel();
       return;
@@ -253,6 +317,189 @@ class JiesuOverlay {
       this.toggleSelecting();
     }
   };
+
+  /* ---------------- 拖拽重排（布局语义，不产生绝对定位） ---------------- */
+
+  /**
+   * 拖拽的语义边界（刻意收窄）：
+   *  - 只调整**同一个父容器内**同级元素的顺序
+   *  - 落地方式是移动 JSX 节点，绝不写 position / left / top
+   *  - 父容器不是 flex/grid、或 DOM 子项数与源码子项数不一致 → 明确拒绝
+   */
+  private buildDragContext(): DragContext | null {
+    if (!this.selected) return null;
+    const container = this.selected.element.parentElement;
+    if (!container) {
+      this.showToast('该元素没有父容器，无法调整顺序', true);
+      return null;
+    }
+
+    const style = getComputedStyle(container);
+    const mode = dragModeFromDisplay(style.display, style.flexDirection);
+    if (!mode) {
+      this.showToast(
+        `父容器不是 flex/grid 布局（display: ${style.display}），暂不支持拖拽重排`,
+        true,
+      );
+      return null;
+    }
+
+    const locator = parseElementLocator(container);
+    if (!locator?.anchor) {
+      this.showToast('父容器没有源码锚点，无法安全重排', true);
+      return null;
+    }
+
+    const items = Array.from(container.children).filter(
+      (child): child is HTMLElement => child instanceof HTMLElement,
+    );
+    const from = items.indexOf(this.selected.element);
+    if (from < 0 || items.length < 2) {
+      this.showToast('该容器里没有可重排的同级元素', true);
+      return null;
+    }
+
+    return {
+      container,
+      locator,
+      items,
+      rects: items.map((item) => toRect(item.getBoundingClientRect())),
+      containerRect: toRect(container.getBoundingClientRect()),
+      mode,
+      from,
+    };
+  }
+
+  private onPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0) return;
+    if (!this.selected) return;
+    const target = event.target as HTMLElement | null;
+    if (!target || target === this.host || this.host.contains(target)) return;
+    // 只有"按在已选中元素内部"才可能是拖拽；点别处仍然是常规选中
+    if (!this.selected.element.contains(target)) return;
+    this.pendingDrag = { x: event.clientX, y: event.clientY };
+  };
+
+  private onPointerMove = (event: PointerEvent): void => {
+    const point = { x: event.clientX, y: event.clientY };
+    this.lastPointer = point;
+
+    if (this.pendingDrag && !this.drag) {
+      if (!exceededThreshold(this.pendingDrag, point)) return;
+      const context = this.buildDragContext();
+      this.pendingDrag = null;
+      if (!context) return;
+      this.beginDrag(context);
+    }
+
+    if (!this.drag) return;
+    event.preventDefault();
+    this.updateDrag(point);
+  };
+
+  private onPointerUp = (event: PointerEvent): void => {
+    this.lastPointer = { x: event.clientX, y: event.clientY };
+    this.pendingDrag = null;
+    if (this.drag) this.finishDrag();
+  };
+
+  private beginDrag(context: DragContext): void {
+    this.drag = context;
+    this.dragInsertAt = context.from;
+    this.hl.style.display = 'none';
+    this.tag.style.display = 'none';
+
+    const rect = context.rects[context.from];
+    this.paintBox(this.ghost, rect);
+    this.ghost.style.display = 'block';
+
+    // 拖拽期间禁止选中文本：否则会拖出一片蓝色选区，体验很差
+    document.documentElement.style.userSelect = 'none';
+  }
+
+  /** 计算插入位置并画出指示线。 */
+  private updateDrag(point: Point): void {
+    if (!this.drag) return;
+    const { rects, mode, containerRect } = this.drag;
+
+    const insertAt =
+      mode.kind === 'linear'
+        ? insertionIndexLinear(rects, mode.axis, point)
+        : insertionIndexGrid(rects, point);
+    this.dragInsertAt = insertAt;
+
+    const outside = isOutside(containerRect, point);
+    const indicator =
+      mode.kind === 'linear'
+        ? linearIndicator(rects, mode.axis, insertAt)
+        : gridIndicator(rects, insertAt);
+
+    if (!indicator) return;
+    this.paintBox(this.drop, indicator);
+    this.drop.classList.toggle('bad', outside);
+    this.drop.style.display = 'block';
+  }
+
+  /**
+   * 松手：把"松手位置"翻译成一次结构级重排。
+   *
+   * 注意 locator 用的是**父容器**——childOrder 作用在容器上，
+   * 被拖的子项只是顺序变了，自身并不需要改写。
+   */
+  private finishDrag(): void {
+    const context = this.drag;
+    const insertAt = this.dragInsertAt;
+    const point = this.lastPointer;
+    this.teardownDrag();
+    // 拖拽结束后浏览器还会派发一次 click，这次不能被当成"选中另一个元素"
+    this.suppressClick = true;
+
+    if (!context || insertAt === null) return;
+
+    if (point && isOutside(context.containerRect, point)) {
+      this.showToast('跨容器拖拽暂不支持，已取消这次调整', true);
+      return;
+    }
+
+    const plan = planReorder(context.items.length, context.from, insertAt);
+    if (!plan) {
+      this.showToast('无法确定目标位置，已取消', true);
+      return;
+    }
+    if (plan.noop) return;
+
+    const to = insertAt > context.from ? insertAt : insertAt + 1;
+    this.requestChange(
+      { kind: 'childOrder', to: plan.order, expectItems: context.items.length },
+      `调整顺序：第 ${context.from + 1} 项 → 第 ${to} 位`,
+      context.locator,
+    );
+  }
+
+  private cancelDrag(): void {
+    this.teardownDrag();
+    this.showToast('已取消拖拽');
+  }
+
+  private teardownDrag(): void {
+    this.drag = null;
+    this.dragInsertAt = null;
+    this.drop.style.display = 'none';
+    this.drop.classList.remove('bad');
+    this.ghost.style.display = 'none';
+    document.documentElement.style.userSelect = '';
+    if (this.selected) this.paintSelection(this.selected.element);
+  }
+
+  /** 记录最后一次指针位置（松手时判断是否拖到了容器外）。 */
+  private lastPointer: Point | null = null;
+
+  private paintBox(element: HTMLElement, rect: Rect): void {
+    element.style.left = `${rect.left}px`;
+    element.style.top = `${rect.top}px`;
+    element.style.width = `${rect.width}px`;
+    element.style.height = `${rect.height}px`;
+  }
 
   /* ---------------- HMR 后重新绑定选中态 ---------------- */
 
@@ -279,7 +526,7 @@ class JiesuOverlay {
     }
     if (!this.selected) return;
 
-    const baselineClass = this.selected.element.className;
+    const baseline = signatureOf(this.selected.element);
     const delays = [60, 120, 250, 400, 700, 1200];
     let attempt = 0;
 
@@ -305,8 +552,10 @@ class JiesuOverlay {
         return;
       }
 
-      // 情况 B：节点还在但 class 变了 → 内容已更新，刷新面板
-      if (element.className !== baselineClass) {
+      // 情况 B：节点还在但状态变了 → 内容已更新，刷新
+      // 为什么要看注入属性：拖拽重排后 class 没变，变的是锚点与行号，
+      // 只比 className 会以为"还没变化"，白等到超时才刷新。
+      if (signatureOf(element) !== baseline) {
         this.refreshSelectionState();
         return;
       }
@@ -435,9 +684,15 @@ class JiesuOverlay {
     }
 
     const lengthProps = props.filter((p) => p.kind === 'length');
-    if (lengthProps.length) {
+    const spacingProps = lengthProps.filter((p) => p.prefix !== 'rounded');
+    const radiusProps = lengthProps.filter((p) => p.prefix === 'rounded');
+    if (spacingProps.length) {
       body.appendChild(this.section('间距'));
-      for (const prop of lengthProps) body.appendChild(this.lengthRow(prop));
+      for (const prop of spacingProps) body.appendChild(this.lengthRow(prop));
+    }
+    if (radiusProps.length) {
+      body.appendChild(this.section('圆角'));
+      for (const prop of radiusProps) body.appendChild(this.lengthRow(prop));
     }
 
     const fontSize = props.find((p) => p.kind === 'fontSize');
@@ -458,7 +713,23 @@ class JiesuOverlay {
       for (const prop of enumProps) body.appendChild(this.selectRow(prop, prop.options ?? []));
     }
 
+    const tip = this.dragTip();
+    if (tip) body.appendChild(tip);
+
     this.panel.append(head, src, body);
+  }
+
+  /** 可拖拽时给一句提示——拖拽是隐式交互，不说明没人会试。 */
+  private dragTip(): HTMLElement | null {
+    if (!this.selected) return null;
+    const container = this.selected.element.parentElement;
+    if (!container) return null;
+    const style = getComputedStyle(container);
+    if (!dragModeFromDisplay(style.display, style.flexDirection)) return null;
+    const tip = document.createElement('div');
+    tip.className = 'jd-tip';
+    tip.textContent = '拖动当前元素，可调整它在同级中的顺序（只改代码里的节点顺序）';
+    return tip;
   }
 
   private section(label: string): HTMLElement {
@@ -605,8 +876,8 @@ class JiesuOverlay {
 
   private colorRow(prop: EditableProp): HTMLElement {
     const row = document.createElement('div');
-    row.className = 'jd-row';
-    row.style.flexWrap = 'wrap';
+    // 色板 + 十六进制输入占宽度较大，标签独占一行，避免被挤成竖排
+    row.className = 'jd-row stacked';
     const label = document.createElement('label');
     label.textContent = prop.label;
     const swatches = document.createElement('div');
@@ -763,11 +1034,11 @@ class JiesuOverlay {
     }, isError ? 4200 : 2200);
   }
 
-  private requestChange(op: unknown, summary: string): void {
+  private requestChange(op: unknown, summary: string, locator?: ElementLocator): void {
     if (!this.selected) return;
     this.send({
       type: 'requestChange',
-      payload: { locator: this.selected.locator, op: op as never, summary },
+      payload: { locator: locator ?? this.selected.locator, op: op as never, summary },
     });
   }
 
@@ -775,6 +1046,14 @@ class JiesuOverlay {
     document.addEventListener('mousemove', this.onMouseMove, true);
     document.addEventListener('click', this.onClick, true);
     document.addEventListener('keydown', this.onKeyDown, true);
+    document.addEventListener('pointerdown', this.onPointerDown, true);
+    document.addEventListener('pointermove', this.onPointerMove, true);
+    document.addEventListener('pointerup', this.onPointerUp, true);
+    document.addEventListener('pointercancel', this.onPointerUp, true);
+    // 阻止浏览器原生的拖拽（拖图片/链接会走 HTML5 DnD，和我们的拖拽冲突）
+    document.addEventListener('dragstart', (event) => {
+      if (this.drag) event.preventDefault();
+    });
     this.ensureObserver();
   }
 }
@@ -833,6 +1112,25 @@ function parseElementLocator(element: HTMLElement): ElementLocator | null {
 function shortSrc(src: string): string {
   const parts = src.split(':');
   return `${parts[parts.length - 3]}:${parts[parts.length - 2]}`;
+}
+
+/** DOMRect → 纯数据矩形（覆盖层用 position:fixed，视口坐标可直接用）。 */
+function toRect(rect: DOMRect): Rect {
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+}
+
+/**
+ * 元素"状态签名"：class + 注入的位置属性。
+ *
+ * 用途：写完代码后判断这个元素是否已经跟着 HMR 更新了。
+ * 只看 className 会漏掉"顺序变了、class 没变"的情况（拖拽重排就是）。
+ */
+function signatureOf(element: HTMLElement): string {
+  return [
+    element.className,
+    element.getAttribute('data-jiesu-src') ?? '',
+    element.getAttribute('data-jiesu-id') ?? '',
+  ].join('|');
 }
 
 /* ---------------- 启动 ---------------- */

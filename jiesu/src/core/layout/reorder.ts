@@ -15,6 +15,45 @@ export interface ReorderResult {
 }
 
 /**
+ * 收集可重排的子项区间。
+ *
+ * 判定：非空白的 JSON 子节点（元素、片段、表达式容器…）各算一项；
+ * 纯空白 JSXText 只是排版，不算项；含实际文本则整体拒绝。
+ */
+function collectItems(
+  parent: JSXElement,
+): { ok: true; items: Array<{ start: number; end: number }> } | { ok: false; reason: string } {
+  const items: Array<{ start: number; end: number }> = [];
+  for (const child of parent.children) {
+    if (child.type === 'JSXText') {
+      if (child.value.trim().length > 0) {
+        return { ok: false, reason: '容器内含有实际文本内容，重排会改变语义，已拒绝' };
+      }
+      continue;
+    }
+    const start = child.start;
+    const end = child.end;
+    if (typeof start !== 'number' || typeof end !== 'number') {
+      return { ok: false, reason: '子节点缺少位置信息，无法安全重排' };
+    }
+    items.push({ start, end });
+  }
+  return { ok: true, items };
+}
+
+/**
+ * 容器内可重排的子项数量。
+ *
+ * 用途：DOM 侧数出的同级元素个数必须与这个数一致，
+ * 才能认为"DOM 第 i 个子元素 = 源码第 i 个子项"。
+ * 不一致（条件渲染、循环、片段多根）时宁可拒绝，也不改错东西。
+ */
+export function reorderItemCount(parent: JSXElement): number {
+  const collected = collectItems(parent);
+  return collected.ok ? collected.items.length : -1;
+}
+
+/**
  * 重排 JSX 子项顺序 —— 布局语义编辑里最"真"的一个操作。
  *
  * 与"加 order-N 类"不同，移动 JSX 节点改变的是**文档顺序**，
@@ -28,29 +67,11 @@ export function reorderJsxChildren(
   parent: JSXElement,
   order: number[],
 ): ReorderResult {
-  const children = parent.children;
-
-  // 1. 分离空白与项
-  const items: Array<{ start: number; end: number }> = [];
-  for (const child of children) {
-    if (child.type === 'JSXText') {
-      if (child.value.trim().length > 0) {
-        return {
-          ok: false,
-          reason: '容器内含有实际文本内容，重排会改变语义，已拒绝',
-          itemCount: 0,
-        };
-      }
-      continue;
-    }
-    const start = child.start;
-    const end = child.end;
-    if (typeof start !== 'number' || typeof end !== 'number') {
-      return { ok: false, reason: '子节点缺少位置信息，无法安全重排', itemCount: 0 };
-    }
-    items.push({ start, end });
+  const collected = collectItems(parent);
+  if (!collected.ok) {
+    return { ok: false, reason: collected.reason, itemCount: 0 };
   }
-
+  const items = collected.items;
   const n = items.length;
   if (n === 0) {
     return { ok: false, reason: '容器内没有可重排的子项', itemCount: 0 };

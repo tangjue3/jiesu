@@ -207,4 +207,42 @@ describe('S4 · 布局语义编辑', () => {
     expect(result.reason).toContain('重复');
     expect(result.code).toBeUndefined();
   });
+
+  it('拖拽重排：DOM 项数与源码子项数一致时正常执行', () => {
+    const code = readFixture('sidebar.tsx');
+    const result = applyLayoutOp(code, locateByClassToken(code, 'min-h-screen'), {
+      kind: 'childOrder',
+      to: [1, 0],
+      expectItems: 2,
+    });
+
+    // 不再需要 UI 传入父容器上下文——容器自身是 flex 就能判断
+    expect(result.status).toBe('ok');
+    expect(result.changed).toBe(true);
+    expect(result.code!.indexOf('<main')).toBeLessThan(result.code!.indexOf('<aside'));
+  });
+
+  it('拖拽重排：DOM 项数与源码子项数不一致时拒绝（条件渲染/循环）', () => {
+    const code = readFixture('sidebar.tsx');
+    const result = applyLayoutOp(code, locateByClassToken(code, 'min-h-screen'), {
+      kind: 'childOrder',
+      to: [1, 0],
+      expectItems: 3,
+    });
+
+    expect(result.status).toBe('unresolved');
+    expect(result.reason).toContain('索引对不上');
+    expect(result.code).toBeUndefined();
+  });
+
+  it('拖拽重排：容器不是 flex/grid 时拒绝', () => {
+    const code = readFixture('contact-form.tsx');
+    const result = applyLayoutOp(code, locateByClassToken(code, 'rounded-md'), {
+      kind: 'childOrder',
+      to: [1, 0],
+    });
+
+    expect(result.status).toBe('unresolved');
+    expect(result.reason).toContain('不是 flex/grid 布局');
+  });
 });

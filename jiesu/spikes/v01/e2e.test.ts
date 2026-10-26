@@ -52,6 +52,8 @@ describe('V0.1 · 端到端（真实 Chrome + 真实文件）', () => {
     vite = await createServer({
       root: DEMO,
       logLevel: 'error',
+      // 各 demo 独立缓存目录：多个 e2e 并行跑时会抢同一个 .vite 缓存
+      cacheDir: join(DEMO, '.vite-cache'),
       server: { host: '127.0.0.1', port: 5199, strictPort: true },
     });
     await vite.listen();

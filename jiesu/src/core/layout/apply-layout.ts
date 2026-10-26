@@ -6,7 +6,7 @@ import { parseClass } from '../write/tailwind-classes.js';
 import { pxToSpacingScale } from '../write/units.js';
 import { auditLayoutSafety } from './guard.js';
 import { checkRequirements, inferLayoutContext, type LayoutContext } from './model.js';
-import { reorderJsxChildren } from './reorder.js';
+import { reorderItemCount, reorderJsxChildren } from './reorder.js';
 import { FAMILIES, type Family } from './tw-layout.js';
 import { computeDiff, type FileDiff } from '../write/apply.js';
 
@@ -28,7 +28,19 @@ export type LayoutOp =
     }
   | { kind: 'gridCols'; to: number; variant?: string }
   | { kind: 'gridRows'; to: number; variant?: string }
-  | { kind: 'childOrder'; to: number[] };
+  | {
+      kind: 'childOrder';
+      /** 新的顺序（元素在当前容器内的原始序号数组） */
+      to: number[];
+      /**
+       * UI 层数到的同级项数量。
+       *
+       * 拖拽重排时，客户端只能看到渲染后的 DOM 子元素，
+       * 而源码里的子项可能包含条件渲染/循环（数量与 DOM 不一致）。
+       * 两者不一致就说明"DOM 第 i 项 ≠ 源码第 i 项"，此时宁可拒绝也不改错。
+       */
+      expectItems?: number;
+    };
 
 export interface LayoutResult {
   status: 'ok' | 'unresolved' | 'not-found';
@@ -193,13 +205,46 @@ export function applyLayoutOp(
   if (op.kind === 'childOrder') {
     // 重排的是**选中元素自己**的子项
     const container: JSXElement = located.jsx;
-    const req = checkRequirements(
-      { display: 'other', isFlexContainer: false, isGridContainer: false, hasLayoutClasses: false },
-      { parent: 'flex' },
-      parentContext,
-    );
-    if (!req.ok) {
-      return { status: 'unresolved', reason: req.reason, changed: false };
+
+    // 前置条件：容器自身必须是 flex / grid。
+    // 优先从容器自己的 class 推断（core 能独立判断，不依赖 UI 传上下文）；
+    // class 是动态的推不出来时，才退回调用方给的上下文。
+    let ctx: LayoutContext | null = null;
+    const ownTarget = getClassNameTarget(container.openingElement);
+    if (ownTarget.form !== 'unresolved') {
+      const ownText =
+        ownTarget.form === 'string'
+          ? ownTarget.node.value
+          : ownTarget.node.quasis.map((q) => q.value.raw).join(' ');
+      ctx = inferLayoutContext(ownText.split(/\s+/).filter(Boolean));
+    }
+    const effective = ctx ?? parentContext ?? null;
+    if (!effective) {
+      return {
+        status: 'unresolved',
+        reason: '无法确定该容器的布局方式，已拒绝重排子项',
+        changed: false,
+      };
+    }
+    if (!effective.isFlexContainer && !effective.isGridContainer) {
+      return {
+        status: 'unresolved',
+        reason: `该容器不是 flex/grid 布局（display: ${effective.display}），重排子项不适用`,
+        changed: false,
+      };
+    }
+
+    // DOM 侧的项数必须与源码子项数一致，否则索引对不上 → 拒绝
+    const itemCount = reorderItemCount(container);
+    if (itemCount < 0) {
+      return { status: 'unresolved', reason: '容器内含有实际文本内容，无法重排子项', changed: false };
+    }
+    if (op.expectItems !== undefined && op.expectItems !== itemCount) {
+      return {
+        status: 'unresolved',
+        reason: `页面上有 ${op.expectItems} 个同级元素，源码里有 ${itemCount} 个子项，索引对不上，已拒绝重排（可能含条件渲染或循环生成的子项）`,
+        changed: false,
+      };
     }
 
     const result = reorderJsxChildren(code, container, op.to);
