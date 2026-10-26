@@ -54,15 +54,17 @@ const STYLE = `
 .jd-body { flex: 1; overflow-y: auto; padding: 8px 0 16px; }
 .jd-sec { padding: 6px 12px 2px; font-size: 11px; color: #94a3b8; letter-spacing: .04em; }
 .jd-row { padding: 4px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.jd-row label { color: #475569; flex: 1; white-space: nowrap; }
+.jd-row label { color: #475569; flex: 1 1 auto; min-width: 0; white-space: nowrap; }
 .jd-row.stacked { flex-wrap: wrap; }
+.jd-row.actions { gap: 6px; }
+.jd-row.actions > label { flex: 0 0 auto; }
 .jd-row.stacked > label { flex: 0 0 100%; }
 .jd-row input[type=number], .jd-row input[type=text], .jd-row select { width: 104px; padding: 3px 6px; border: 1px solid rgba(0,0,0,.16); border-radius: 4px; font-size: 12px; }
 .jd-row textarea { width: 100%; padding: 4px 6px; border: 1px solid rgba(0,0,0,.16); border-radius: 4px; font-size: 12px; resize: vertical; }
-.jd-sw { display: flex; gap: 4px; flex-wrap: wrap; }
-.jd-sw button { width: 18px; height: 18px; border-radius: 3px; border: 1px solid rgba(0,0,0,.16); cursor: pointer; padding: 0; }
-.jd-sw button.on { outline: 2px solid #2563eb; outline-offset: 1px; }
-.jd-btn { padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(0,0,0,.16); background: #fff; cursor: pointer; font-size: 12px; }
+.jd-sw { display: flex; gap: 4px; flex-wrap: wrap; flex: 0 0 auto; }
+.jd-sw button.jd-chip { width: 18px; height: 18px; border-radius: 3px; border: 1px solid rgba(0,0,0,.16); cursor: pointer; padding: 0; flex: 0 0 auto; }
+.jd-sw button.jd-chip.on { outline: 2px solid #2563eb; outline-offset: 1px; }
+.jd-btn { padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(0,0,0,.16); background: #fff; cursor: pointer; font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
 .jd-btn.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
 .jd-btn:disabled { opacity: .45; cursor: not-allowed; }
 .jd-basket { position: fixed; left: 12px; bottom: 12px; min-width: 220px; max-width: 460px; background: #fff; border: 1px solid rgba(0,0,0,.12); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.12); pointer-events: auto; display: none; }
@@ -1213,7 +1215,7 @@ class JiesuOverlay {
   private moveRow(): HTMLElement {
     const current = this.currentTranslation();
     const row = document.createElement('div');
-    row.className = 'jd-row stacked';
+    row.className = 'jd-row stacked actions';
 
     const label = document.createElement('label');
     label.textContent = 'X / Y';
@@ -1271,7 +1273,7 @@ class JiesuOverlay {
   /** 复制 / 删除。两者都会重排同级锚点，所以统一走串行化的 applyStructure。 */
   private structureActions(): HTMLElement {
     const row = document.createElement('div');
-    row.className = 'jd-row';
+    row.className = 'jd-row actions';
 
     const label = document.createElement('label');
     label.textContent = '本元素';
@@ -1296,7 +1298,7 @@ class JiesuOverlay {
     const wrap = document.createElement('div');
 
     const pickRow = document.createElement('div');
-    pickRow.className = 'jd-row';
+    pickRow.className = 'jd-row actions';
     const label = document.createElement('label');
     label.textContent = '插入';
     const select = document.createElement('select');
@@ -1310,7 +1312,7 @@ class JiesuOverlay {
     pickRow.append(label, select);
 
     const atRow = document.createElement('div');
-    atRow.className = 'jd-row';
+    atRow.className = 'jd-row actions';
     const spacer = document.createElement('label');
     spacer.textContent = '';
     const buttons = document.createElement('div');
@@ -1545,6 +1547,7 @@ class JiesuOverlay {
     for (const candidate of candidates) {
       const button = document.createElement('button');
       button.type = 'button';
+      button.className = 'jd-chip';
       button.title = candidate;
       button.style.background = CSS_COLOR[candidate] ?? '#cbd5e1';
       if (candidate === prop.base) button.classList.add('on');
