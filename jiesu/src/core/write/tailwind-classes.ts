@@ -178,32 +178,3 @@ export function parseClass(raw: string): ParsedClass {
   const base = match?.[2] ?? raw;
   return { raw, variants, base, category: classifyBaseClass(base) };
 }
-
-export function splitClasses(value: string): string[] {
-  return value.split(/\s+/).filter((t) => t.length > 0);
-}
-
-export function joinClasses(tokens: string[]): string {
-  return tokens.join(' ');
-}
-
-/** 在 token 列表中查找同类别、且基础部分等于 from 的 token。 */
-export function findByCategoryAndBase(
-  tokens: string[],
-  category: StyleCategory,
-  fromBase: string,
-): string[] {
-  return tokens.filter((token) => {
-    const parsed = parseClass(token);
-    return parsed.category === category && parsed.base === fromBase;
-  });
-}
-
-/**
- * 生成替换后的 token：保留变体前缀，只换基础部分。
- * `md:hover:p-4` → `md:hover:p-6`
- */
-export function replaceBase(token: string, newBase: string): string {
-  const parsed = parseClass(token);
-  return `${parsed.variants}${newBase}`;
-}

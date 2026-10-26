@@ -7,9 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { applyOp, type ApplyResult, type StyleOp } from '../../src/core/write/apply';
 import { classifyBaseClass } from '../../src/core/write/tailwind-classes';
 import { pxToTailwindClass, pxToSpacingScale } from '../../src/core/write/units';
-import { locateByClassToken, locateByLine, locateByStyleProp, locateByText } from './helpers';
+import { locateByClassToken, locateByLine, locateByStyleProp, locateByText } from '../_shared/jsx-fixture';
 
-const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '../../fixtures');
+const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const original = (name: string) => readFileSync(join(FIXTURES, 'original', name), 'utf8');
 const expected = (name: string) => readFileSync(join(FIXTURES, 'expected', name), 'utf8');
 

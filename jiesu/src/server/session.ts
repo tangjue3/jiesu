@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 import { applyLayoutOp, type LayoutOp } from '../core/layout/apply-layout.js';
 import { applyOp, type StyleOp } from '../core/write/apply.js';
@@ -159,12 +159,4 @@ export class EditSession {
     writeFileSync(tmp, content, 'utf8');
     renameSync(tmp, absPath);
   }
-}
-
-export function defaultProjectRoot(): string {
-  return resolve(process.cwd());
-}
-
-export function joinRoot(root: string, filePath: string): string {
-  return join(root, filePath);
 }

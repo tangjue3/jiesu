@@ -1,7 +1,10 @@
 /**
- * 构建脚本：把三个入口打包成可发布产物。
- *   dist/cli/bin.js        —— npx jiesu 的可执行入口
- *   dist/vite-plugin/index.js —— 用户项目里引用的插件
+ * 构建脚本：把两个入口打包成可发布产物。
+ *   dist/cli/bin.js            —— npx jiesu 的可执行入口
+ *   dist/vite-plugin/index.js  —— 用户项目里引用的插件
+ *
+ * 核心代码（@babel/parser / magic-string / 覆盖层脚本）会被内联进产物，
+ * 所以它们留在 devDependencies；只有 ws 与 esbuild 是运行时依赖。
  */
 import { build } from 'esbuild';
 

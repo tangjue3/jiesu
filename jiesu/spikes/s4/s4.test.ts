@@ -2,13 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { applyLayoutOp } from '../../src/core/layout/apply-layout';
 import { auditLayoutSafety } from '../../src/core/layout/guard';
-import {
-  classTokens,
-  flexParent,
-  gridParent,
-  locateByClassToken,
-  readFixture,
-} from './helpers';
+import { locateByClassToken } from '../_shared/jsx-fixture';
+import { classTokens, flexParent, gridParent, readFixture } from './helpers';
 
 /** 断言：产物里绝不出现绝对定位类或绝对定位样式。 */
 function expectNoAbsolutePositioning(code: string) {

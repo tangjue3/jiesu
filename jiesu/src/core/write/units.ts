@@ -14,13 +14,6 @@ export function pxToSpacingScale(px: number): string | null {
   return String(n);
 }
 
-/** '4' → 16；'0.5' → 2。 */
-export function spacingScaleToPx(scale: string): number | null {
-  const n = Number(scale);
-  if (!Number.isFinite(n)) return null;
-  return n * SPACING_STEP_PX;
-}
-
 /**
  * 把 px 值翻译成某个类族的 Tailwind 类名。
  * 例：spacing + 24px → 'p-6'；radius + 8px → 'rounded-lg'（Tailwind 半径刻度固定，非线性）。

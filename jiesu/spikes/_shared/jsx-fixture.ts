@@ -1,11 +1,18 @@
+/**
+ * 测试用 JSX 定位工具（靶场 fixture 专用，不进产品内核）。
+ *
+ * 真实运行时是靠编译期注入的 `data-jiesu-src` 拿到 `file:line:column`；
+ * 这里是它的替身：直接解析 fixture 源码，按 class token / 文本 / 行号反推出同样的定位，
+ * 从而让 S2/S4 这些纯 Node 用例不需要起浏览器。
+ */
+
 import { parse } from '@babel/parser';
-import type {
-  JSXAttribute,
-  JSXElement,
-  JSXOpeningElement,
-  TemplateElement,
-} from '@babel/types';
+import type { JSXAttribute, JSXElement, JSXOpeningElement, TemplateElement } from '@babel/types';
+
 import type { ElementLocator } from '../../src/core/locate/parse';
+
+/** fixture 里并没有真实文件名，统一用占位名。 */
+const FIXTURE_FILE = 'fixture.tsx';
 
 export interface ElementHit {
   el: JSXOpeningElement;
@@ -67,7 +74,7 @@ export function staticClassText(el: JSXOpeningElement): string | null {
 
 function toLocator(el: JSXOpeningElement): ElementLocator {
   return {
-    filePath: 'fixture.tsx',
+    filePath: FIXTURE_FILE,
     line: el.loc!.start.line,
     column: el.loc!.start.column,
   };
@@ -89,8 +96,7 @@ export function locateByClassToken(code: string, token: string, occurrence = 0):
 
 /** 按文本内容定位元素。 */
 export function locateByText(code: string, text: string): ElementLocator {
-  const hits = collectJsx(code);
-  for (const hit of hits) {
+  for (const hit of collectJsx(code)) {
     if (!hit.parent) continue;
     const hasText = hit.parent.children.some(
       (c) => c.type === 'JSXText' && c.value.includes(text),

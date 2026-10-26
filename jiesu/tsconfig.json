@@ -13,5 +13,11 @@
     "types": ["node"]
   },
   "include": ["src", "spikes"],
-  "exclude": ["node_modules", "spikes/s1/demo"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    // 靶场与 demo 是被测对象，不是被测代码：它们故意包含非法/动态写法，不能纳入类型检查
+    "spikes/**/fixtures",
+    "spikes/**/demo"
+  ]
 }

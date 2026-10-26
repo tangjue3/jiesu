@@ -105,11 +105,3 @@ export function findByFingerprint(
 function cssEscape(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
-
-/**
- * 判断元素是否仍在文档中。
- * HMR 替换节点后，旧节点会脱离文档（isConnected = false）。
- */
-export function isStillAttached(el: Element): boolean {
-  return el.isConnected;
-}

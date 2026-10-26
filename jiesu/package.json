@@ -17,7 +17,8 @@
     "build": "node scripts/build.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "vitest run spikes/v01/e2e.test.ts",
+    "e2e": "vitest run spikes/*/e2e.test.ts",
+    "demo": "./scripts/demo.sh",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
