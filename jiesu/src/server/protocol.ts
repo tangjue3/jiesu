@@ -1,6 +1,7 @@
 import type { FileDiff } from '../core/write/apply.js';
 import type { LayoutOp } from '../core/layout/apply-layout.js';
 import type { StyleOp } from '../core/write/apply.js';
+import type { StructureOp } from '../core/write/structure.js';
 
 /** 元素在源码中的位置（与编译期注入的 data-jiesu-src 对应）。 */
 export interface ElementLocator {
@@ -41,6 +42,20 @@ export type ClientMessage =
         summary: string;
       };
     }
+  /**
+   * 结构编辑（插入 / 删除 / 复制节点）。
+   *
+   * 与 requestChange 分开的理由：它**会重排同级元素的结构锚点**，
+   * 属于"变更定位基准"的操作，客户端必须等 HMR 落地并刷新锚点后才能继续编辑。
+   */
+  | {
+      type: 'requestStructure';
+      payload: {
+        locator: ElementLocator;
+        op: StructureOp;
+        summary: string;
+      };
+    }
   | { type: 'undo'; payload: { changeId: string } }
   | { type: 'history' }
   | { type: 'ping' };
@@ -56,6 +71,11 @@ export type ServerMessage =
          * 写回会改变文件内容 → 行号漂移 → 客户端靠新锚点重新定位。
          */
         anchor?: string;
+        /**
+         * 结构编辑后应该选中的元素。
+         * 插入 → 新节点；删除 → 父节点；客户端据此在 HMR 后找到目标。
+         */
+        select?: { anchor: string; line: number; column: number };
       };
     }
   | { type: 'changeUndone'; payload: { changeId: string } }

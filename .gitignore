@@ -43,3 +43,6 @@ coverage/
 
 # 打包产物
 *.tgz
+
+# 设计参考原件（内容已归档到 docs/reference/，避免重复入库 10MB）
+jiesu_ui_reference_v2.zip

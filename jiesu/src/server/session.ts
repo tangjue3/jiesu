@@ -3,6 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 import { applyLayoutOp, type LayoutOp } from '../core/layout/apply-layout.js';
 import { applyOp, type StyleOp } from '../core/write/apply.js';
+import { applyStructure, type StructureOp } from '../core/write/structure.js';
 import type { ChangeRecord, ElementLocator } from './protocol.js';
 
 export class EditError extends Error {
@@ -20,6 +21,8 @@ export interface ApplyOutcome {
   record: ChangeRecord;
   /** 写回后元素的新结构锚点 */
   anchor?: string;
+  /** 结构编辑后应该选中的元素（插入→新节点，删除→父节点） */
+  select?: { anchor: string; line: number; column: number };
 }
 
 /**
@@ -61,6 +64,59 @@ export class EditSession {
     summary: string,
   ): ApplyOutcome {
     return this.applyChange(locator, op, summary, 'layout');
+  }
+
+  /**
+   * 结构编辑：插入 / 删除 / 复制节点。
+   *
+   * 与属性编辑的关键差别：它**改变文件的行数与同级索引**，
+   * 因此必须回传"接下来该选中谁"——插入指向新节点、删除指向父节点。
+   * 客户端拿不到这个信息就只能瞎猜，或者留一个指向死节点的选中态。
+   */
+  applyStructureChange(
+    locator: ElementLocator,
+    op: StructureOp,
+    summary: string,
+  ): ApplyOutcome {
+    const absPath = this.resolvePath(locator.filePath);
+    if (!existsSync(absPath)) {
+      throw new EditError('源文件不存在', locator.filePath);
+    }
+    const original = readFileSync(absPath, 'utf8');
+
+    const result = applyStructure(original, locator, op);
+    if (result.status !== 'ok') {
+      throw new EditError(result.reason ?? '无法应用该结构修改', `status=${result.status}`);
+    }
+    if (!result.changed || !result.code) {
+      throw new EditError('该修改没有产生任何变化');
+    }
+
+    this.writeFileAtomic(absPath, result.code);
+
+    // 结构编辑永远只有一处 splice，直接用精确片段记录，撤销才可靠。
+    // （不能用 pickFragment 的"邻近三行"启发式：插入场景下它会把相邻行当成被替换内容）
+    const edit = result.edits[0];
+    const record: ChangeRecord = {
+      id: `chg_${++this.counter}`,
+      filePath: locator.filePath,
+      summary,
+      before: edit?.before ?? '',
+      after: edit?.after ?? '',
+      diff: result.diff ?? { startLine: 0, endLine: 0, before: '', after: '' },
+      createdAt: Date.now(),
+      locator: { ...locator, anchor: locator.anchor },
+    };
+    this.changes.push(record);
+
+    const select =
+      result.newAnchor !== undefined
+        ? { anchor: result.newAnchor, line: result.newLine ?? 0, column: result.newColumn ?? 0 }
+        : result.nextAnchor !== undefined
+          ? { anchor: result.nextAnchor, line: 0, column: 0 }
+          : undefined;
+
+    return { record, select };
   }
 
   private applyChange(

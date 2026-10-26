@@ -145,6 +145,20 @@ function handleMessage(
       return;
     }
 
+    case 'requestStructure': {
+      const { locator, op, summary } = message.payload;
+      const outcome = session.applyStructureChange(locator, op, summary);
+      broadcast({
+        type: 'changeApplied',
+        payload: {
+          change: outcome.record,
+          anchor: outcome.anchor,
+          select: outcome.select,
+        },
+      });
+      return;
+    }
+
     case 'undo': {
       const record = session.undo(message.payload.changeId);
       broadcast({ type: 'changeUndone', payload: { changeId: record.id } });

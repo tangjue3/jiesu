@@ -183,7 +183,8 @@ export function computeDiff(original: string, updated: string): FileDiff {
   };
 }
 
-function applyEdits(code: string, edits: SourceEdit[]): string {
+/** 按字符区间应用一组修改。插入用 start === end 表示。 */
+export function applyEdits(code: string, edits: SourceEdit[]): string {
   const sorted = [...edits].sort((a, b) => b.start - a.start);
   let out = code;
   for (const edit of sorted) {
