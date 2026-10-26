@@ -8,6 +8,7 @@ import { auditLayoutSafety } from './guard.js';
 import { checkRequirements, inferLayoutContext, type LayoutContext } from './model.js';
 import { reorderJsxChildren } from './reorder.js';
 import { FAMILIES, type Family } from './tw-layout.js';
+import { computeDiff, type FileDiff } from '../write/apply.js';
 
 export type LayoutOp =
   | { kind: 'flexDirection'; to: string; variant?: string }
@@ -38,6 +39,8 @@ export interface LayoutResult {
   family?: string;
   /** 命中的 class token 数 */
   matched?: number;
+  /** 与原文件的行级差异 */
+  diff?: FileDiff;
 }
 
 /* ------------------------------------------------------------------ *
@@ -214,7 +217,14 @@ export function applyLayoutOp(
         changed: false,
       };
     }
-    return { status: 'ok', changed: true, code: updated, family: 'childOrder', matched: result.itemCount };
+    return {
+      status: 'ok',
+      changed: true,
+      code: updated,
+      family: 'childOrder',
+      matched: result.itemCount,
+      diff: computeDiff(code, updated),
+    };
   }
 
   /* ---------- 族操作 ---------- */
@@ -332,5 +342,6 @@ export function applyLayoutOp(
     code: updated,
     family: request.family.name,
     matched,
+    diff: computeDiff(code, updated),
   };
 }
