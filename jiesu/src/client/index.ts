@@ -5,6 +5,8 @@ import {
   type EditableProp,
 } from '../core/inspect/editable-props.js';
 import { classToPx } from '../core/inspect/tw-px.js';
+import { COMPONENT_TEMPLATES, findTemplate } from '../core/library/components.js';
+import type { StructureOp } from '../core/write/structure.js';
 import {
   parseTranslate,
   snapPx,
@@ -246,6 +248,15 @@ class JiesuOverlay {
         this.changes.push(message.payload.change);
         this.renderBasket();
         this.showToast(`已应用：${message.payload.change.summary}`);
+        // 结构编辑：等 HMR 落地后选中服务端指定的元素（插入 → 新节点，删除 → 父节点）。
+        // 不能用旧定位自己去找：同级索引已经重排，旧锚点会指向别的元素。
+        if (message.payload.select) {
+          this.awaitStructureSelect(
+            message.payload.select,
+            message.payload.change.filePath,
+          );
+          break;
+        }
         // 写回会触发 HMR → DOM 重建。等 Vite 推送新模块后重新绑定选中态。
         // 只有"本次操作的目标就是选中元素"时才采用服务端回传的锚点：
         // 拖拽重排的目标是父容器，被拖子项的锚点会随位置变化，
@@ -260,7 +271,8 @@ class JiesuOverlay {
           };
         }
         this.syncSelection();
-        break;      case 'changeUndone':
+        break;
+      case 'changeUndone':
         this.changes = this.changes.filter((c) => c.id !== message.payload.changeId);
         this.renderBasket();
         break;
@@ -275,6 +287,8 @@ class JiesuOverlay {
           this.pendingMove = null;
           if (this.selected) this.paintSelection(this.selected.element);
         }
+        // 结构编辑被拒绝 → 必须解锁，否则整个面板就废了
+        this.endStructureEdit();
         this.showToast(message.payload.message, true);
         break;
       default:
@@ -715,6 +729,29 @@ class JiesuOverlay {
    * 所以写回后不能直接用旧的 element 引用，必须等 DOM 稳定后重新同步。
    */
   private syncTimer: number | null = null;
+
+  /* ---------------- 结构编辑串行化 ----------------
+   *
+   * 为什么必须串行：插入/删除会**重排同级元素的结构锚点**。
+   * 实测（S5）：插入前 <section> 是 0.1，插入后新元素占走 0.1、<section> 变成 0.2。
+   * 此时用旧定位去解析新文件，**锚点与行号会一致地指向新插入的元素**，
+   * 双锚点交叉校验给出"完全可信"的错误答案。
+   *
+   * 所以规则是：一次结构编辑发出后，锁住后续编辑，
+   * 直到 HMR 落地、新目标被选中、锚点被重新读取，才允许下一次操作。
+   */
+  private structureBusy = false;
+  /** 看门狗：服务端没回消息 / HMR 一直不来时，不能把界面永久锁死 */
+  private structureWatchdog: number | null = null;
+  /** 等待目标元素出现在 DOM 的轮询 */
+  private structurePoll: number | null = null;
+
+  /** 结构编辑进行中时拒绝新的编辑请求，并把原因说清楚。 */
+  private blockedByStructure(): boolean {
+    if (!this.structureBusy) return false;
+    this.showToast('上一次结构改动还在落地，请稍候再改', true);
+    return true;
+  }
 
   /**
    * 同步选中态与当前 DOM。
@@ -1162,6 +1199,10 @@ class JiesuOverlay {
     body.appendChild(this.section('位移'));
     body.appendChild(this.moveRow());
 
+    body.appendChild(this.section('结构'));
+    body.appendChild(this.structureActions());
+    body.appendChild(this.insertControls());
+
     const tip = this.dragTip();
     if (tip) body.appendChild(tip);
 
@@ -1223,6 +1264,91 @@ class JiesuOverlay {
   private currentTranslation(): Translation {
     if (!this.selected) return { x: 0, y: 0 };
     return parseTranslate(this.selected.element.className.split(/\s+/).filter(Boolean));
+  }
+
+  /* ---------------- 结构操作控件 ---------------- */
+
+  /** 复制 / 删除。两者都会重排同级锚点，所以统一走串行化的 applyStructure。 */
+  private structureActions(): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'jd-row';
+
+    const label = document.createElement('label');
+    label.textContent = '本元素';
+
+    const buttons = document.createElement('div');
+    buttons.className = 'jd-sw';
+
+    const copy = this.structButton('复制', () => {
+      this.applyStructure({ kind: 'duplicate' }, '复制元素');
+    });
+    const remove = this.structButton('删除', () => {
+      this.applyStructure({ kind: 'delete' }, '删除元素');
+    });
+
+    buttons.append(copy, remove);
+    row.append(label, buttons);
+    return row;
+  }
+
+  /** 插入组件：选模板 + 选位置。这就是"从组件库拖进来"的第一版形态。 */
+  private insertControls(): HTMLElement {
+    const wrap = document.createElement('div');
+
+    const pickRow = document.createElement('div');
+    pickRow.className = 'jd-row';
+    const label = document.createElement('label');
+    label.textContent = '插入';
+    const select = document.createElement('select');
+    select.dataset.jdTemplate = '1';
+    for (const template of COMPONENT_TEMPLATES) {
+      const option = document.createElement('option');
+      option.value = template.id;
+      option.textContent = `${template.group} · ${template.name}`;
+      select.appendChild(option);
+    }
+    pickRow.append(label, select);
+
+    const atRow = document.createElement('div');
+    atRow.className = 'jd-row';
+    const spacer = document.createElement('label');
+    spacer.textContent = '';
+    const buttons = document.createElement('div');
+    buttons.className = 'jd-sw';
+
+    const insert = (position: 'before' | 'after' | 'last') => {
+      const template = findTemplate(select.value);
+      if (!template) {
+        this.showToast('请选择一个组件模板', true);
+        return;
+      }
+      const op: StructureOp =
+        position === 'last'
+          ? { kind: 'insertChild', position: 'last', snippet: template.snippet }
+          : { kind: 'insert', position, snippet: template.snippet };
+      const where = position === 'before' ? '上方' : position === 'after' ? '下方' : '内部';
+      this.applyStructure(op, `插入 ${template.name}（${where}）`);
+    };
+
+    buttons.append(
+      this.structButton('上方', () => insert('before')),
+      this.structButton('下方', () => insert('after')),
+      this.structButton('内部', () => insert('last')),
+    );
+
+    atRow.append(spacer, buttons);
+    wrap.append(pickRow, atRow);
+    return wrap;
+  }
+
+  private structButton(text: string, onClick: () => void): HTMLButtonElement {
+    const button = document.createElement('button');
+    button.className = 'jd-btn';
+    button.textContent = text;
+    button.dataset.jdStruct = '1';
+    button.disabled = this.structureBusy;
+    button.onclick = onClick;
+    return button;
   }
 
   /** 拖拽是隐式交互，不说明没人会试；顺便说明两种拖法的区别。 */
@@ -1569,6 +1695,7 @@ class JiesuOverlay {
 
   private requestChange(op: unknown, summary: string, locator?: ElementLocator): void {
     if (!this.selected) return;
+    if (this.blockedByStructure()) return;
     // 发送前从**活着的 DOM 元素**上重读锚点：
     // 写回与 HMR 之间隔了几十到几百毫秒，任何缓存的行号都可能已经过期，
     // 而"改错元素"是这个产品最不能犯的错。
@@ -1578,6 +1705,105 @@ class JiesuOverlay {
       type: 'requestChange',
       payload: { locator: locator ?? fresh ?? this.selected.locator, op: op as never, summary },
     });
+  }
+
+  /* ---------------- 结构编辑（插入 / 删除 / 复制） ---------------- */
+
+  /**
+   * 发出一次结构编辑。
+   *
+   * 与 requestChange 分开：它改变同级元素的锚点，所以发出去就上锁，
+   * 下一次编辑必须等新目标被选中、锚点重读之后。
+   */
+  private applyStructure(op: StructureOp, summary: string): void {
+    if (!this.selected) return;
+    if (this.blockedByStructure()) return;
+
+    const fresh = parseElementLocator(this.selected.element);
+    if (fresh) this.selected.locator = fresh;
+    const locator = fresh ?? this.selected.locator;
+
+    this.structureBusy = true;
+    this.refreshStructureUi();
+    this.armStructureWatchdog();
+    this.send({ type: 'requestStructure', payload: { locator, op, summary } });
+  }
+
+  /**
+   * 结构编辑后接管"接下来该选中谁"。
+   *
+   * 为什么是找 DOM 而不是接着用旧锚点：
+   * 插入会让新元素占走原来的同级索引，旧锚点 + 旧行号会**一致地**指向新元素，
+   * 交叉校验也拦不住（S5 实测）。所以由服务端算好目标，客户端只负责等它出现。
+   */
+  private awaitStructureSelect(
+    select: { anchor: string; line: number; column: number },
+    filePath: string,
+  ): void {
+    const targetId = `${filePath}#${select.anchor}`;
+    const previous = this.selected?.element;
+    const previousRect = previous?.isConnected ? previous.getBoundingClientRect() : null;
+
+    const delays = [60, 120, 200, 320, 500, 800, 1200];
+    let attempt = 0;
+
+    const tryFind = (): void => {
+      this.structurePoll = null;
+
+      const matches = Array.from(
+        document.querySelectorAll<HTMLElement>(`[data-jiesu-id="${escapeAttrValue(targetId)}"]`),
+      );
+
+      if (matches.length > 0) {
+        this.selectElement(pickNearest(matches, previousRect));
+        this.endStructureEdit();
+        return;
+      }
+
+      if (attempt < delays.length) {
+        this.structurePoll = window.setTimeout(tryFind, delays[attempt]);
+        attempt += 1;
+        return;
+      }
+
+      // 明确失败，而不是留一个指向旧位置（可能已被别的元素占用）的选中态
+      this.endStructureEdit();
+      this.showToast(
+        '结构改动已写入代码，但页面上没找到目标元素（可能被条件渲染挡住）',
+        true,
+      );
+    };
+
+    this.structurePoll = window.setTimeout(tryFind, delays[0]);
+  }
+
+  private armStructureWatchdog(): void {
+    if (this.structureWatchdog !== null) window.clearTimeout(this.structureWatchdog);
+    this.structureWatchdog = window.setTimeout(() => {
+      this.structureWatchdog = null;
+      if (!this.structureBusy) return;
+      this.endStructureEdit();
+      this.showToast('结构编辑超时未确认，已解锁', true);
+    }, 8000);
+  }
+
+  private endStructureEdit(): void {
+    this.structureBusy = false;
+    if (this.structureWatchdog !== null) {
+      window.clearTimeout(this.structureWatchdog);
+      this.structureWatchdog = null;
+    }
+    if (this.structurePoll !== null) {
+      window.clearTimeout(this.structurePoll);
+      this.structurePoll = null;
+    }
+    this.refreshStructureUi();
+  }
+
+  /** 结构按钮在锁住期间要禁用——不然用户会一直点、一直收到同一条拒绝提示。 */
+  private refreshStructureUi(): void {
+    const buttons = this.panel?.querySelectorAll<HTMLButtonElement>('[data-jd-struct]') ?? [];
+    for (const button of buttons) button.disabled = this.structureBusy;
   }
 
   start(): void {
@@ -1682,6 +1908,34 @@ function signatureOf(element: HTMLElement): string {
     element.getAttribute('data-jiesu-src') ?? '',
     element.getAttribute('data-jiesu-id') ?? '',
   ].join('|');
+}
+
+/** 属性选择器里的值转义（路径可能含引号/反斜杠）。 */
+function escapeAttrValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
+ * 同一个源码元素可能在页面上有多个实例（列表渲染）。
+ * 结构编辑后优先选**离原选中位置最近**的那个，用户才不会觉得"跳走了"。
+ */
+function pickNearest(elements: HTMLElement[], previous: DOMRect | null): HTMLElement {
+  if (elements.length === 1 || !previous) return elements[0];
+  const cx = previous.left + previous.width / 2;
+  const cy = previous.top + previous.height / 2;
+  let best = elements[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const element of elements) {
+    const rect = element.getBoundingClientRect();
+    const dx = rect.left + rect.width / 2 - cx;
+    const dy = rect.top + rect.height / 2 - cy;
+    const distance = dx * dx + dy * dy;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = element;
+    }
+  }
+  return best;
 }
 
 /* ---------------- 启动 ---------------- */
