@@ -19,6 +19,12 @@ import {
   type Point,
   type Rect,
 } from './drag.js';
+import {
+  buildLayerTree,
+  countEditable,
+  keyChainOf,
+  type LayerNode,
+} from './layers.js';
 import { findByFingerprint, fingerprintOf, type ElementFingerprint } from './fingerprint.js';
 
 /* ------------------------------------------------------------------ *
@@ -68,6 +74,24 @@ const STYLE = `
 .jd-drop.bad { background: #94a3b8; }
 .jd-ghost { position: fixed; border: 1.5px dashed #2563eb; background: rgba(37,99,235,.05); border-radius: 4px; pointer-events: none; display: none; }
 .jd-tip { padding: 6px 12px 0; color: #94a3b8; font-size: 11px; line-height: 1.5; }
+
+/* 图层面板（左侧） */
+.jd-layers { position: fixed; left: 0; top: 0; bottom: 0; width: 232px; background: rgba(255,255,255,.97); border-right: 1px solid rgba(0,0,0,.12); box-shadow: 2px 0 12px rgba(0,0,0,.05); pointer-events: auto; display: flex; flex-direction: column; }
+.jd-layers.off { display: none; }
+.jd-lhead { padding: 8px 10px; border-bottom: 1px solid rgba(0,0,0,.08); display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.jd-lcount { color: #94a3b8; font-size: 10px; }
+.jd-lbody { flex: 1; overflow: auto; padding: 4px 0 12px; }
+.jd-lrow { display: flex; align-items: baseline; gap: 4px; padding: 2px 8px 2px 2px; cursor: pointer; white-space: nowrap; border-left: 2px solid transparent; overflow: hidden; }
+.jd-lrow:hover { background: rgba(37,99,235,.08); }
+.jd-lrow.sel { background: rgba(234,88,12,.12); border-left-color: #ea580c; }
+.jd-lrow.nosrc { opacity: .5; }
+.jd-care { width: 12px; flex: 0 0 12px; text-align: center; color: #94a3b8; font-size: 9px; }
+.jd-ltag { color: #0f172a; font-family: ui-monospace, Menlo, monospace; font-size: 11px; flex: 0 0 auto; }
+.jd-lrow.sel .jd-ltag { color: #c2410c; }
+.jd-lcls { color: #94a3b8; font-family: ui-monospace, Menlo, monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.jd-ltxt { color: #64748b; font-size: 10px; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.jd-tab-l { position: fixed; left: 0; top: 50%; transform: translateY(-50%); background: rgba(17,24,39,.9); color: #fff; padding: 9px 4px; border-radius: 0 5px 5px 0; pointer-events: auto; cursor: pointer; writing-mode: vertical-rl; font-size: 11px; display: none; }
+.jd-tab-l.on { display: block; }
 `;
 
 interface Selected {
@@ -117,6 +141,25 @@ class JiesuOverlay {
   /** 拖拽结束后的那次 click 不应再触发"重新选中" */
   private suppressClick = false;
 
+  /* 图层树状态 */
+  private layers!: HTMLDivElement;
+  private layerBody!: HTMLDivElement;
+  private layerCount!: HTMLSpanElement;
+  private layerTab!: HTMLDivElement;
+  private layerRoot: LayerNode | null = null;
+  private layerExpanded = new Set<string>(['0']);
+  /**
+   * 默认收起。
+   *
+   * 理由：这个页面不是我们的画布——面板一展开就会盖住左侧 232px，
+   * 用户点不到下面的元素（实测会直接让拖拽失效）。
+   * 所以改成"左侧常驻标签 + 主动展开"，需要时再占用空间。
+   */
+  private layersVisible = false;
+  private layersDirty = true;
+  private layersInitialized = false;
+  private layersTimer: number | null = null;
+
   constructor() {
     this.host = document.createElement('div');
     this.host.setAttribute('data-jiesu-overlay', '');
@@ -149,6 +192,7 @@ class JiesuOverlay {
     rootEl.append(this.drop, this.ghost);
 
     this.buildPanel();
+    this.buildLayers();
     this.buildBasket();
     this.buildToast();
   }
@@ -230,20 +274,7 @@ class JiesuOverlay {
     if (!target || target === this.host) return;
     if (this.host.contains(target)) return;
 
-    const rect = target.getBoundingClientRect();
-    this.hl.classList.remove('sel');
-    this.hl.style.display = 'block';
-    this.hl.style.left = `${rect.left}px`;
-    this.hl.style.top = `${rect.top}px`;
-    this.hl.style.width = `${rect.width}px`;
-    this.hl.style.height = `${rect.height}px`;
-
-    const src = target.getAttribute('data-jiesu-src');
-    this.tag.classList.remove('sel');
-    this.tag.style.display = 'block';
-    this.tag.style.left = `${rect.left}px`;
-    this.tag.style.top = `${Math.max(0, rect.top - 20)}px`;
-    this.tag.textContent = src ? shortSrc(src) : `${target.tagName.toLowerCase()}（无法定位源码）`;
+    this.paintHover(target);
   };
 
   private onClick = (event: MouseEvent): void => {
@@ -261,28 +292,34 @@ class JiesuOverlay {
     event.preventDefault();
     event.stopPropagation();
 
-    const src = target.getAttribute('data-jiesu-src');
-    if (!src) {
-      this.showToast('该元素没有源码位置信息，无法编辑', true);
-      return;
-    }
+    this.selectElement(target);
+  };
 
-    const locator = parseElementLocator(target);
+  /**
+   * 选中一个元素（点击画布、点图层树、重绑定都走这里）。
+   *
+   * 抽成单一入口的原因：图层树和画布必须完全一致地表现"当前选中"，
+   * 否则两处状态会各自漂移。
+   */
+  private selectElement(element: HTMLElement): boolean {
+    const locator = parseElementLocator(element);
     if (!locator) {
       this.showToast('该元素没有源码位置信息，无法编辑', true);
-      return;
+      return false;
     }
-    const props = resolveEditableProps(target.className.split(/\s+/).filter(Boolean));
+
     this.selected = {
-      element: target,
+      element,
       locator,
-      props,
-      fingerprint: fingerprintOf(target),
+      props: resolveEditableProps(element.className.split(/\s+/).filter(Boolean)),
+      fingerprint: fingerprintOf(element),
     };
 
-    this.paintSelection(target);
+    this.paintSelection(element);
     this.renderPanel();
-  };
+    this.revealInLayers(element);
+    return true;
+  }
 
   /** 绘制选中高亮框与标签。 */
   private paintSelection(element: HTMLElement): void {
@@ -315,6 +352,12 @@ class JiesuOverlay {
     if (isToggle) {
       event.preventDefault();
       this.toggleSelecting();
+      return;
+    }
+    const isLayers = event.altKey && event.shiftKey && event.key.toLowerCase() === 'l';
+    if (isLayers) {
+      event.preventDefault();
+      this.toggleLayers();
     }
   };
 
@@ -517,13 +560,14 @@ class JiesuOverlay {
    *
    * HMR 是异步链路（写文件 → vite 编译 → 推模块 → react 重渲染），
    * 立刻去找元素会扑空；等太久又会让面板显示过期数值。
-   * 所以采用「轮询等待变化」：检测到 class 变化或节点被替换才算稳定。
+   * 所以采用「轮询等待变化」：检测到 class / 锚点变化或节点被替换才算稳定。
+   *
+   * 注意：已经在等待时**不要重置计时**。
+   * 频繁的 DOM 变动（React 一次提交会改很多属性）会不断重置，
+   * 轮询就永远等不到结果——那样面板会一直显示过期的行号。
    */
   private syncSelection(): void {
-    if (this.syncTimer !== null) {
-      window.clearTimeout(this.syncTimer);
-      this.syncTimer = null;
-    }
+    if (this.syncTimer !== null) return;
     if (!this.selected) return;
 
     const baseline = signatureOf(this.selected.element);
@@ -531,6 +575,7 @@ class JiesuOverlay {
     let attempt = 0;
 
     const attemptSync = (): void => {
+      this.syncTimer = null;
       if (!this.selected) return;
       const element = this.selected.element;
 
@@ -586,6 +631,9 @@ class JiesuOverlay {
     };
     this.paintSelection(element);
     this.renderPanel();
+    // 节点被替换了 → 图层树里的引用也过期了，重建并重新高亮
+    this.layersDirty = true;
+    this.renderLayers();
   }
 
   /**
@@ -617,6 +665,9 @@ class JiesuOverlay {
   private ensureObserver(): void {
     if (this.observer || typeof MutationObserver === 'undefined') return;
     this.observer = new MutationObserver(() => {
+      // 图层树依赖 DOM 结构与 class，所以与"有没有选中"无关，先标记脏
+      this.invalidateLayers();
+
       if (!this.selected || this.observerScheduled) return;
       this.observerScheduled = true;
       // 让 React 先把新 DOM 挂上去，再同步
@@ -627,7 +678,231 @@ class JiesuOverlay {
     });
     // 脚本注入在 <head>，此时 body 可能还不存在 → 等 DOM 就绪再观察
     const target = document.body ?? document.documentElement;
-    this.observer.observe(target, { childList: true, subtree: true });
+    this.observer.observe(target, {
+      childList: true,
+      subtree: true,
+      // class / 锚点变化会让图层标签过时（写回改的就是 class）
+      attributes: true,
+      attributeFilter: ['class', 'data-jiesu-id'],
+    });
+  }
+
+  /* ---------------- 图层面板 ---------------- */
+
+  private buildLayers(): void {
+    this.layers = document.createElement('div');
+    this.layers.className = 'jd-layers';
+
+    const head = document.createElement('div');
+    head.className = 'jd-lhead';
+    const left = document.createElement('div');
+    left.style.display = 'flex';
+    left.style.alignItems = 'center';
+    left.style.gap = '6px';
+    const title = document.createElement('span');
+    title.className = 'jd-title';
+    title.textContent = '图层';
+    this.layerCount = document.createElement('span');
+    this.layerCount.className = 'jd-lcount';
+    left.append(title, this.layerCount);
+
+    const collapse = document.createElement('button');
+    collapse.className = 'jd-btn';
+    collapse.textContent = '收起';
+    collapse.onclick = () => this.setLayersVisible(false);
+    head.append(left, collapse);
+
+    this.layerBody = document.createElement('div');
+    this.layerBody.className = 'jd-lbody';
+
+    this.layers.append(head, this.layerBody);
+    this.root.appendChild(this.layers);
+
+    this.layerTab = document.createElement('div');
+    this.layerTab.className = 'jd-tab-l';
+    this.layerTab.textContent = '图层';
+    this.layerTab.title = '展开图层（Alt+Shift+L）';
+    this.layerTab.onclick = () => this.setLayersVisible(true);
+    this.root.appendChild(this.layerTab);
+
+    this.setLayersVisible(this.layersVisible);
+  }
+
+  private setLayersVisible(visible: boolean): void {
+    this.layersVisible = visible;
+    this.layers.classList.toggle('off', !visible);
+    this.layerTab.classList.toggle('on', !visible);
+    if (visible) {
+      this.layersDirty = true;
+      this.renderLayers();
+    }
+  }
+
+  private toggleLayers(): void {
+    this.setLayersVisible(!this.layersVisible);
+  }
+
+  /**
+   * 图层树是懒构建 + 脏标记：页面 DOM 被 HMR 改动后才重建。
+   * 一次 DOM 全量遍历在真实项目上要几毫秒到几十毫秒，不能每次交互都做。
+   */
+  private ensureLayerRoot(): LayerNode | null {
+    // 客户端脚本注入在 <head>，执行时 body 可能还不存在 → 先不建树
+    const body = document.body;
+    if (!body) return null;
+
+    if (!this.layerRoot || this.layersDirty) {
+      this.layerRoot = buildLayerTree(body);
+      this.layersDirty = false;
+      if (!this.layersInitialized && this.layerRoot) {
+        this.expandTopLevels(this.layerRoot, 0);
+        this.layersInitialized = true;
+      }
+    }
+    return this.layerRoot;
+  }
+
+  /**
+   * 默认展开前几层，让用户一打开就能看到页面主干。
+   *
+   * 为什么是 3 层：真实页面外面通常套着 `body > #root > App 根节点`，
+   * 只展开两层的话用户看到的全是框架外壳，等于没展开。
+   */
+  private expandTopLevels(node: LayerNode, depth: number): void {
+    if (depth >= 3) return;
+    if (node.children.length) this.layerExpanded.add(node.key);
+    for (const child of node.children) this.expandTopLevels(child, depth + 1);
+  }
+
+  private renderLayers(): void {
+    if (!this.layersVisible) return;
+    const root = this.ensureLayerRoot();
+    this.layerBody.innerHTML = '';
+
+    if (!root) {
+      this.layerCount.textContent = '';
+      const empty = document.createElement('div');
+      empty.className = 'jd-bempty';
+      empty.textContent = '页面还没有元素';
+      this.layerBody.appendChild(empty);
+      return;
+    }
+
+    this.layerCount.textContent = `${countEditable([root])} 可编辑`;
+
+    const walk = (node: LayerNode, depth: number): void => {
+      this.layerBody.appendChild(this.layerRow(node, depth));
+      if (!this.layerExpanded.has(node.key)) return;
+      for (const child of node.children) walk(child, depth + 1);
+    };
+    walk(root, 0);
+  }
+
+  private layerRow(node: LayerNode, depth: number): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'jd-lrow';
+    row.dataset.jdKey = node.key;
+    row.style.paddingLeft = `${2 + depth * 10}px`;
+    if (!node.anchor) row.classList.add('nosrc');
+    if (this.selected?.element === node.element) row.classList.add('sel');
+    row.title = node.anchor ? `${node.file}  ·  ${node.anchor}` : '该元素没有源码位置';
+
+    const expanded = this.layerExpanded.has(node.key);
+    const caret = document.createElement('span');
+    caret.className = 'jd-care';
+    caret.textContent = node.children.length ? (expanded ? '▾' : '▸') : '';
+    if (node.children.length) {
+      caret.onclick = (event) => {
+        event.stopPropagation();
+        if (expanded) this.layerExpanded.delete(node.key);
+        else this.layerExpanded.add(node.key);
+        this.renderLayers();
+      };
+    }
+
+    const tag = document.createElement('span');
+    tag.className = 'jd-ltag';
+    tag.textContent = node.tag;
+    row.append(caret, tag);
+
+    if (node.cls) {
+      const cls = document.createElement('span');
+      cls.className = 'jd-lcls';
+      cls.textContent = `.${node.cls}`;
+      row.appendChild(cls);
+    }
+    if (node.text) {
+      const text = document.createElement('span');
+      text.className = 'jd-ltxt';
+      text.textContent = node.text;
+      row.appendChild(text);
+    }
+
+    row.onmouseenter = () => this.paintHover(node.element);
+    row.onmouseleave = () => this.clearHover();
+    row.onclick = () => {
+      if (!node.anchor) {
+        this.showToast('该元素没有源码位置（多半来自第三方库），无法编辑', true);
+        return;
+      }
+      this.selectElement(node.element);
+    };
+    return row;
+  }
+
+  /** 点图层节点时，把它的祖先链展开并滚动到可见。 */
+  private revealInLayers(element: HTMLElement): void {
+    if (!this.layersVisible) return;
+    const body = document.body;
+    if (!body) return;
+    const keys = keyChainOf(body, element);
+    if (!keys.length) return;
+    for (const key of keys) this.layerExpanded.add(key);
+    this.renderLayers();
+
+    const ownKey = keys[keys.length - 1];
+    const row = Array.from(this.layerBody.querySelectorAll<HTMLElement>('.jd-lrow')).find(
+      (item) => item.dataset.jdKey === ownKey,
+    );
+    row?.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** 鼠标悬停在图层节点上时，在页面上画出高亮（不改变选中态）。 */
+  private paintHover(element: HTMLElement): void {
+    const rect = element.getBoundingClientRect();
+    this.hl.classList.remove('sel');
+    this.hl.style.display = 'block';
+    this.hl.style.left = `${rect.left}px`;
+    this.hl.style.top = `${rect.top}px`;
+    this.hl.style.width = `${rect.width}px`;
+    this.hl.style.height = `${rect.height}px`;
+
+    const src = element.getAttribute('data-jiesu-src');
+    this.tag.classList.remove('sel');
+    this.tag.style.display = 'block';
+    this.tag.style.left = `${rect.left}px`;
+    this.tag.style.top = `${Math.max(0, rect.top - 20)}px`;
+    this.tag.textContent = src ? shortSrc(src) : element.tagName.toLowerCase();
+  }
+
+  private clearHover(): void {
+    if (this.selected) {
+      this.paintSelection(this.selected.element);
+      return;
+    }
+    this.hl.style.display = 'none';
+    this.tag.style.display = 'none';
+  }
+
+  /** DOM 被改动后把图层树标记为脏，并延迟重画（避免一次 HMR 重画多次）。 */
+  private invalidateLayers(): void {
+    this.layersDirty = true;
+    if (!this.layersVisible) return;
+    if (this.layersTimer !== null) window.clearTimeout(this.layersTimer);
+    this.layersTimer = window.setTimeout(() => {
+      this.layersTimer = null;
+      this.renderLayers();
+    }, 150);
   }
 
   /* ---------------- 面板 ---------------- */
@@ -641,6 +916,8 @@ class JiesuOverlay {
   private closePanel(): void {
     this.panel.classList.remove('on');
     this.selected = null;
+    // 选中态是共享的：面板关掉，图层树里的高亮也要一起清掉
+    this.renderLayers();
   }
 
   private renderPanel(): void {
@@ -698,7 +975,13 @@ class JiesuOverlay {
     const fontSize = props.find((p) => p.kind === 'fontSize');
     if (fontSize) {
       body.appendChild(this.section('文字'));
-      body.appendChild(this.selectRow(fontSize, FONT_SIZE_STEPS));
+      // 选项必须是完整类名（text-2xl），因为写回层接收的是类名而不是档位
+      body.appendChild(
+        this.selectRow(
+          fontSize,
+          FONT_SIZE_STEPS.map((step) => `text-${step}`),
+        ),
+      );
     }
 
     const colorProps = props.filter((p) => p.kind === 'color');
@@ -748,6 +1031,13 @@ class JiesuOverlay {
   private updatePanelValues(): void {
     if (!this.selected) return;
     const props = this.selected.props;
+
+    // 行号会漂移，面板上显示的必须是刚读到的那个
+    const srcEl = this.panel.querySelector('.jd-src');
+    if (srcEl) {
+      const { filePath, line, column } = this.selected.locator;
+      srcEl.textContent = `${filePath}:${line}:${column}`;
+    }
 
     const numberInputs = Array.from(
       this.panel.querySelectorAll<HTMLInputElement>('.jd-row input[type=number]'),
@@ -841,7 +1131,8 @@ class JiesuOverlay {
     for (const option of options) {
       const opt = document.createElement('option');
       opt.value = option;
-      opt.textContent = option;
+      // 行标题已经说明是"字号"，下拉里只显示档位（2xl）更好读
+      opt.textContent = option.startsWith('text-') ? option.slice(5) : option;
       if (option === prop.base) opt.selected = true;
       select.appendChild(opt);
     }
@@ -1036,9 +1327,14 @@ class JiesuOverlay {
 
   private requestChange(op: unknown, summary: string, locator?: ElementLocator): void {
     if (!this.selected) return;
+    // 发送前从**活着的 DOM 元素**上重读锚点：
+    // 写回与 HMR 之间隔了几十到几百毫秒，任何缓存的行号都可能已经过期，
+    // 而"改错元素"是这个产品最不能犯的错。
+    const fresh = parseElementLocator(this.selected.element);
+    if (fresh && !locator) this.selected.locator = fresh;
     this.send({
       type: 'requestChange',
-      payload: { locator: locator ?? this.selected.locator, op: op as never, summary },
+      payload: { locator: locator ?? fresh ?? this.selected.locator, op: op as never, summary },
     });
   }
 
@@ -1055,6 +1351,19 @@ class JiesuOverlay {
       if (this.drag) event.preventDefault();
     });
     this.ensureObserver();
+    // 脚本在 <head> 执行时 body 尚不存在，等 DOM 就绪再画第一次
+    if (document.body) {
+      this.renderLayers();
+    } else {
+      document.addEventListener(
+        'DOMContentLoaded',
+        () => {
+          this.layersDirty = true;
+          this.renderLayers();
+        },
+        { once: true },
+      );
+    }
   }
 }
 
