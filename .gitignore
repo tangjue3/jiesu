@@ -1,0 +1,45 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+dist/
+dist-ssr/
+build/
+out/
+*.tsbuildinfo
+
+# 缓存
+.vite/
+.cache/
+.turbo/
+.eslintcache
+
+# 环境变量（含密钥，禁止入库）
+.env
+.env.*
+!.env.example
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 测试与覆盖率
+coverage/
+.nyc_output/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# 本地 agent 工作区（记忆与临时状态，不入库）
+.workbuddy/
+
+# 打包产物
+*.tgz
