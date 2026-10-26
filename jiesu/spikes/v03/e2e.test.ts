@@ -10,13 +10,15 @@ import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startServer, type RunningServer } from '../../src/server/server';
+import { resetFromHead } from '../_shared/baseline';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEMO = join(HERE, 'demo');
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const APP_PATH = join(DEMO, 'src', 'App.tsx');
 
-const original = readFileSync(APP_PATH, 'utf8');
+// 基线从 git HEAD 取：避免上次运行的脏文件 / 用户在演示里的拖动污染断言
+const original = resetFromHead(APP_PATH);
 const restore = (): void => writeFileSync(APP_PATH, original, 'utf8');
 
 interface Row {
