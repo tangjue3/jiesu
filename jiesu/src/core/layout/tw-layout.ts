@@ -135,8 +135,14 @@ export const FAMILIES: Record<string, Family> = {
 };
 
 /**
- * 绝对定位类黑名单。
+ * 定位类黑名单。
  * 布局语义编辑**绝不允许**产出这些类——这是"改布局不改坏响应式"的最后一道闸。
+ *
+ * `translate-x/y-*` **不在禁令里**（2026-10 策略修订）：
+ * 它是唯一能"让元素跟着鼠标走"又不脱离文档流的手段——
+ * `absolute` 会让父容器塌陷、断点布局全崩；`translate` 只是视觉位移，
+ * 兄弟元素照常排版，响应式不受影响。
+ * 区别不在于"看起来动了"，而在于**元素还在 Flow 里**。
  */
 export const FORBIDDEN_CLASSES = [
   'absolute',
@@ -146,7 +152,7 @@ export const FORBIDDEN_CLASSES = [
   'relative',
 ];
 
-/** 绝对定位相关的属性名前缀（用于 inline style 检查）。 */
+/** 定位相关的属性名（用于 inline style 检查）。内联 `translate` 也不写。 */
 export const FORBIDDEN_STYLE_PROPS = [
   'position',
   'left',
@@ -162,8 +168,8 @@ export const FORBIDDEN_STYLE_PROPS = [
 
 export function isForbiddenClass(base: string): boolean {
   if (FORBIDDEN_CLASSES.includes(base)) return true;
-  // left-0 / top-4 / inset-x-2 之类
-  return /^(left|right|top|bottom|inset|inset-x|inset-y|translate-x|translate-y)-/.test(base);
+  // left-0 / top-4 / inset-x-2 之类（translate-x-* 有意放行，见上方说明）
+  return /^(left|right|top|bottom|inset|inset-x|inset-y)-/.test(base);
 }
 
 export function isForbiddenStyleProp(prop: string): boolean {

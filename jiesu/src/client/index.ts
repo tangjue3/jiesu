@@ -5,6 +5,11 @@ import {
   type EditableProp,
 } from '../core/inspect/editable-props.js';
 import { classToPx } from '../core/inspect/tw-px.js';
+import {
+  parseTranslate,
+  snapPx,
+  type Translation,
+} from '../core/write/translate.js';
 import type { ChangeRecord, ClientMessage, ElementLocator, ServerMessage } from '../server/protocol.js';
 import {
   dragModeFromDisplay,
@@ -73,6 +78,7 @@ const STYLE = `
 .jd-drop { position: fixed; background: #ea580c; border-radius: 2px; pointer-events: none; display: none; box-shadow: 0 0 0 1px rgba(255,255,255,.85); }
 .jd-drop.bad { background: #94a3b8; }
 .jd-ghost { position: fixed; border: 1.5px dashed #2563eb; background: rgba(37,99,235,.05); border-radius: 4px; pointer-events: none; display: none; }
+.jd-move { position: fixed; transform: translateX(-50%); background: #ea580c; color: #fff; padding: 2px 7px; border-radius: 3px; font-size: 11px; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; pointer-events: none; display: none; white-space: nowrap; }
 .jd-tip { padding: 6px 12px 0; color: #94a3b8; font-size: 11px; line-height: 1.5; }
 
 /* 图层面板（左侧） */
@@ -114,6 +120,15 @@ interface DragContext {
   from: number;
 }
 
+/** 一次进行中的位移：元素真的跟着鼠标走，但落地是 translate 类。 */
+interface MoveContext {
+  element: HTMLElement;
+  start: Point;
+  /** 拖拽开始时元素已有的位移（class 里的 translate） */
+  base: Translation;
+  current: Translation;
+}
+
 class JiesuOverlay {
   private root: ShadowRoot;
   private host: HTMLDivElement;
@@ -127,6 +142,7 @@ class JiesuOverlay {
   private hint!: HTMLDivElement;
   private drop!: HTMLDivElement;
   private ghost!: HTMLDivElement;
+  private moveLabel!: HTMLDivElement;
 
   private ws!: WebSocket;
   private selecting = false;
@@ -134,10 +150,13 @@ class JiesuOverlay {
   private changes: ChangeRecord[] = [];
   private basketOpen = false;
 
-  /* 拖拽重排状态 */
-  private pendingDrag: Point | null = null;
+  /* 拖拽状态：默认拖 = 元素跟着鼠标走（位移）；Shift+拖 = 调整同级顺序（重排） */
+  private pendingDrag: { start: Point; shift: boolean } | null = null;
   private drag: DragContext | null = null;
   private dragInsertAt: number | null = null;
+  private move: MoveContext | null = null;
+  /** 已写回、但内联预览还没清掉的元素（等 HMR 把 class 应用上再清，避免闪回） */
+  private pendingMove: { element: HTMLElement; x: number; y: number } | null = null;
   /** 拖拽结束后的那次 click 不应再触发"重新选中" */
   private suppressClick = false;
 
@@ -182,14 +201,17 @@ class JiesuOverlay {
 
     this.hint = document.createElement('div');
     this.hint.className = 'jd-hint';
-    this.hint.textContent = 'jiesu：点击元素进行编辑 · 拖动已选元素可调整同级顺序 · Esc 退出';
+    this.hint.textContent =
+      'jiesu：点击元素编辑 · 拖动元素移动 · Shift+拖动调整顺序 · Alt+Shift+L 图层 · Esc 退出';
     rootEl.appendChild(this.hint);
 
     this.drop = document.createElement('div');
     this.drop.className = 'jd-drop';
     this.ghost = document.createElement('div');
     this.ghost.className = 'jd-ghost';
-    rootEl.append(this.drop, this.ghost);
+    this.moveLabel = document.createElement('div');
+    this.moveLabel.className = 'jd-move';
+    rootEl.append(this.drop, this.ghost, this.moveLabel);
 
     this.buildPanel();
     this.buildLayers();
@@ -247,6 +269,12 @@ class JiesuOverlay {
         this.renderBasket();
         break;
       case 'error':
+        // 写回失败 → 把位移预览撤掉，别让元素停在"代码里并不存在"的位置上
+        if (this.pendingMove) {
+          this.clearMovePreview(this.pendingMove.element);
+          this.pendingMove = null;
+          if (this.selected) this.paintSelection(this.selected.element);
+        }
         this.showToast(message.payload.message, true);
         break;
       default:
@@ -268,8 +296,9 @@ class JiesuOverlay {
 
   private onMouseMove = (event: MouseEvent): void => {
     if (!this.selecting) return;
-    // 拖拽中不要画 hover 高亮，否则会和插入指示线打架
-    if (this.drag || this.pendingDrag) return;
+    // 拖拽/位移中不要画 hover 高亮：否则会和插入指示线打架，
+    // 而且 hover 会把源码标签重新显示出来，压住位移数值气泡
+    if (this.drag || this.move || this.pendingDrag) return;
     const target = event.target as HTMLElement | null;
     if (!target || target === this.host) return;
     if (this.host.contains(target)) return;
@@ -340,6 +369,10 @@ class JiesuOverlay {
 
   private onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === 'Escape') {
+      if (this.move) {
+        this.cancelMove();
+        return;
+      }
       if (this.drag) {
         this.cancelDrag();
         return;
@@ -420,31 +453,159 @@ class JiesuOverlay {
     if (!target || target === this.host || this.host.contains(target)) return;
     // 只有"按在已选中元素内部"才可能是拖拽；点别处仍然是常规选中
     if (!this.selected.element.contains(target)) return;
-    this.pendingDrag = { x: event.clientX, y: event.clientY };
+    this.pendingDrag = {
+      start: { x: event.clientX, y: event.clientY },
+      // Shift 在按下的那一刻决定意图，拖到一半再按 Shift 不切换模式（避免误操作）
+      shift: event.shiftKey,
+    };
   };
 
   private onPointerMove = (event: PointerEvent): void => {
     const point = { x: event.clientX, y: event.clientY };
     this.lastPointer = point;
 
-    if (this.pendingDrag && !this.drag) {
-      if (!exceededThreshold(this.pendingDrag, point)) return;
-      const context = this.buildDragContext();
+    const pending = this.pendingDrag;
+    if (pending && !this.drag && !this.move) {
+      if (!exceededThreshold(pending.start, point)) return;
       this.pendingDrag = null;
-      if (!context) return;
-      this.beginDrag(context);
+      if (pending.shift) {
+        const context = this.buildDragContext();
+        if (!context) return;
+        this.beginDrag(context);
+      } else {
+        this.beginMove(pending.start);
+      }
     }
 
-    if (!this.drag) return;
-    event.preventDefault();
-    this.updateDrag(point);
+    if (this.drag) {
+      event.preventDefault();
+      this.updateDrag(point);
+      return;
+    }
+    if (this.move) {
+      event.preventDefault();
+      this.updateMove(point);
+    }
   };
 
   private onPointerUp = (event: PointerEvent): void => {
     this.lastPointer = { x: event.clientX, y: event.clientY };
     this.pendingDrag = null;
     if (this.drag) this.finishDrag();
+    else if (this.move) this.finishMove();
   };
+
+  /* ---------------- 位移：元素跟着鼠标走 ---------------- */
+
+  /**
+   * 拖动开始：记录起始位移，之后每帧用**内联 transform** 做预览。
+   *
+   * 预览用内联、落地用 class，是刻意的分工：
+   *  - 内联 transform 不写文件，拖动过程中 60fps 跟手
+   *  - 松手时只把最终值换算成 `translate-x-N` 写进 className
+   * 所以代码里永远不会出现坐标，只有语义化的位移类。
+   */
+  private beginMove(start: Point): void {
+    if (!this.selected) return;
+    const element = this.selected.element;
+    const base = parseTranslate(element.className.split(/\s+/).filter(Boolean));
+    this.move = { element, start, base, current: { ...base } };
+    document.documentElement.style.userSelect = 'none';
+    this.moveLabel.style.display = 'block';
+    this.paintMove();
+  }
+
+  private updateMove(point: Point): void {
+    const move = this.move;
+    if (!move) return;
+    move.current = {
+      x: snapPx(move.base.x + (point.x - move.start.x)),
+      y: snapPx(move.base.y + (point.y - move.start.y)),
+    };
+    this.paintMove();
+  }
+
+  /** 把当前位移画到页面上（内联预览 + 数值气泡 + 跟随的选中框）。 */
+  private paintMove(): void {
+    const move = this.move;
+    if (!move) return;
+    const { x, y } = move.current;
+    const active = x !== 0 || y !== 0;
+
+    // 关键细节：Tailwind v4 的 translate-x-* 写的是 CSS `translate` 属性，
+    // v3 写的是 `transform`。内联预览必须**同时**压住这两条路径，否则
+    // 后者会和 class 叠加（位移 = class 值 + 内联值，拖一下跳两倍）。
+    //   - translate: 0px  → 抵消 v4 class 的贡献
+    //   - transform: ...   → 覆盖 v3 class 的 transform，并承载绝对位移
+    move.element.style.translate = active ? '0px' : '';
+    move.element.style.transform = active ? `translate3d(${x}px, ${y}px, 0)` : '';
+
+    const rect = move.element.getBoundingClientRect();
+    const sign = (value: number): string => (value > 0 ? `+${value}` : String(value));
+    this.moveLabel.textContent = `X ${sign(x)}  Y ${sign(y)}`;
+    this.moveLabel.style.left = `${rect.left + rect.width / 2}px`;
+    this.moveLabel.style.top = `${Math.max(0, rect.top - 22)}px`;
+
+    this.paintSelection(move.element);
+    // 拖拽时源码标签会被数值气泡压住，让位给更相关的信息
+    this.tag.style.display = 'none';
+  }
+
+  /** 清掉位移的内联预览（v4 的 translate 与 v3 的 transform 两条路径都要清）。 */
+  private clearMovePreview(element: HTMLElement): void {
+    element.style.translate = '';
+    element.style.transform = '';
+  }
+
+  private finishMove(): void {    const move = this.move;
+    this.move = null;
+    this.moveLabel.style.display = 'none';
+    document.documentElement.style.userSelect = '';
+    this.suppressClick = true;
+    if (!move) return;
+
+    const { x, y } = move.current;
+    // 没动（或吸附后回到原点）→ 什么都不做，避免产生无意义 diff
+    if (x === move.base.x && y === move.base.y) {
+      this.clearMovePreview(move.element);
+      if (this.selected) this.paintSelection(this.selected.element);
+      return;
+    }
+
+    // 内联预览先留着：等 HMR 把 class 应用上再清，否则会闪回原位
+    this.pendingMove = { element: move.element, x, y };
+    this.requestChange(
+      { kind: 'translate', xPx: x, yPx: y },
+      `位移 X ${x} Y ${y}`,
+    );
+  }
+
+  /**
+   * HMR 之后清掉内联预览。
+   *
+   * 必须等 class 真的带上目标位移后再清——否则元素会先跳回原位、
+   * 等新 class 生效再跳过去，用户看到的是闪烁。
+   */
+  private settlePendingMove(): void {
+    const pending = this.pendingMove;
+    if (!pending) return;
+    const now = parseTranslate(pending.element.className.split(/\s+/).filter(Boolean));
+    if (now.x !== pending.x || now.y !== pending.y) return;
+    this.clearMovePreview(pending.element);
+    this.pendingMove = null;
+  }
+
+  /** Esc 取消位移：把预览撤掉，代码一个字都不改。 */
+  private cancelMove(): void {
+    if (!this.move) return;
+    this.clearMovePreview(this.move.element);
+    this.move = null;
+    this.moveLabel.style.display = 'none';
+    document.documentElement.style.userSelect = '';
+    this.suppressClick = true;
+    if (this.selected) this.paintSelection(this.selected.element);
+    this.showToast('已取消位移');
+  }
 
   private beginDrag(context: DragContext): void {
     this.drag = context;
@@ -643,6 +804,8 @@ class JiesuOverlay {
    */
   private refreshSelectionState(): void {
     if (!this.selected) return;
+    // 位移的 class 已经生效了 → 现在才可以清掉内联预览
+    this.settlePendingMove();
     const element = this.selected.element;
     const locator = parseElementLocator(element);
     this.selected = {
@@ -996,22 +1159,85 @@ class JiesuOverlay {
       for (const prop of enumProps) body.appendChild(this.selectRow(prop, prop.options ?? []));
     }
 
+    body.appendChild(this.section('位移'));
+    body.appendChild(this.moveRow());
+
     const tip = this.dragTip();
     if (tip) body.appendChild(tip);
 
     this.panel.append(head, src, body);
   }
 
-  /** 可拖拽时给一句提示——拖拽是隐式交互，不说明没人会试。 */
+  /** 位移控件：X / Y 两个数值 + 复位。落地仍然是 translate 类。 */
+  private moveRow(): HTMLElement {
+    const current = this.currentTranslation();
+    const row = document.createElement('div');
+    row.className = 'jd-row stacked';
+
+    const label = document.createElement('label');
+    label.textContent = 'X / Y';
+
+    const controls = document.createElement('div');
+    controls.className = 'jd-sw';
+    controls.style.alignItems = 'center';
+
+    const makeInput = (axis: 'x' | 'y'): HTMLInputElement => {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = '4';
+      input.style.width = '58px';
+      input.value = String(current[axis]);
+      input.dataset.jdMove = axis;
+      input.title = axis === 'x' ? '水平位移（px）' : '垂直位移（px）';
+      input.onchange = () => {
+        const live = this.currentTranslation();
+        const toPx = snapPx(Number(input.value));
+        if (!Number.isFinite(toPx)) {
+          this.showToast('请输入数字（会吸附到 4px 刻度）', true);
+          return;
+        }
+        const next = axis === 'x' ? { x: toPx, y: live.y } : { x: live.x, y: toPx };
+        this.requestChange(
+          { kind: 'translate', xPx: next.x, yPx: next.y },
+          `位移 X ${next.x} Y ${next.y}`,
+        );
+      };
+      return input;
+    };
+
+    const reset = document.createElement('button');
+    reset.className = 'jd-btn';
+    reset.textContent = '复位';
+    reset.dataset.jdReset = '1';
+    reset.disabled = current.x === 0 && current.y === 0;
+    reset.onclick = () => {
+      this.requestChange({ kind: 'translate', xPx: 0, yPx: 0 }, '位移归零');
+    };
+
+    controls.append(makeInput('x'), makeInput('y'), reset);
+    row.append(label, controls);
+    return row;
+  }
+
+  /** 从当前 DOM 的 class 读出位移（代码是唯一真实来源）。 */
+  private currentTranslation(): Translation {
+    if (!this.selected) return { x: 0, y: 0 };
+    return parseTranslate(this.selected.element.className.split(/\s+/).filter(Boolean));
+  }
+
+  /** 拖拽是隐式交互，不说明没人会试；顺便说明两种拖法的区别。 */
   private dragTip(): HTMLElement | null {
     if (!this.selected) return null;
     const container = this.selected.element.parentElement;
-    if (!container) return null;
-    const style = getComputedStyle(container);
-    if (!dragModeFromDisplay(style.display, style.flexDirection)) return null;
+    const canReorder = container
+      ? Boolean(dragModeFromDisplay(getComputedStyle(container).display, getComputedStyle(container).flexDirection))
+      : false;
+
     const tip = document.createElement('div');
     tip.className = 'jd-tip';
-    tip.textContent = '拖动当前元素，可调整它在同级中的顺序（只改代码里的节点顺序）';
+    tip.textContent = canReorder
+      ? '拖动元素 = 跟着鼠标移动（写 translate 类，不写坐标）· Shift+拖动 = 调整同级顺序'
+      : '拖动元素 = 跟着鼠标移动（写 translate 类，不写坐标）';
     return tip;
   }
 
@@ -1064,6 +1290,22 @@ class JiesuOverlay {
       if (select.value !== prop.base && document.activeElement !== select) {
         select.value = prop.base;
       }
+    }
+
+    // 位移输入框：HMR 之后 class 里的 translate 已经变了，要跟着回填
+    const moveInputs = Array.from(
+      this.panel.querySelectorAll<HTMLInputElement>('input[data-jd-move]'),
+    );
+    if (moveInputs.length) {
+      const now = this.currentTranslation();
+      for (const input of moveInputs) {
+        const axis = input.dataset.jdMove === 'y' ? 'y' : 'x';
+        const next = String(now[axis]);
+        if (document.activeElement !== input && input.value !== next) input.value = next;
+      }
+      // 复位按钮的可用状态也得跟着变，否则拖完之后它还是灰的，点不动
+      const reset = this.panel.querySelector<HTMLButtonElement>('button[data-jd-reset]');
+      if (reset) reset.disabled = now.x === 0 && now.y === 0;
     }
   }
 
@@ -1348,7 +1590,7 @@ class JiesuOverlay {
     document.addEventListener('pointercancel', this.onPointerUp, true);
     // 阻止浏览器原生的拖拽（拖图片/链接会走 HTML5 DnD，和我们的拖拽冲突）
     document.addEventListener('dragstart', (event) => {
-      if (this.drag) event.preventDefault();
+      if (this.drag || this.move) event.preventDefault();
     });
     this.ensureObserver();
     // 脚本在 <head> 执行时 body 尚不存在，等 DOM 就绪再画第一次

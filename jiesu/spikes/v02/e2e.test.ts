@@ -144,13 +144,16 @@ describe('V0.2 · 拖拽重排（真实 Chrome + 真实文件）', () => {
     await select(page, '.flex > div:nth-child(1)');
     const state = await panelState(page);
     expect(state.open).toBe(true);
-    expect(state.tip).toContain('拖动当前元素');
+    // V0.4 起默认拖 = 位移，Shift+拖 = 调顺序，提示里必须写清楚
+    expect(state.tip).toContain('跟着鼠标移动');
+    expect(state.tip).toContain('Shift');
   });
 
-  it('把第一张拖到最后 → 源码里节点顺序真的变了', async () => {
+  it('Shift+拖动第一张到最后 → 源码里节点顺序真的变了', async () => {
     const from = await center(page, '.flex > div:nth-child(1)');
     const last = await center(page, '.flex > div:nth-child(3)');
 
+    await page.keyboard.down('Shift');
     await page.mouse.move(from.x, from.y);
     await page.mouse.down();
     await page.mouse.move(from.x + 10, from.y, { steps: 2 });
@@ -162,6 +165,7 @@ describe('V0.2 · 拖拽重排（真实 Chrome + 真实文件）', () => {
     expect(mid.dropShown).toBe('block');
 
     await page.mouse.up();
+    await page.keyboard.up('Shift');
 
     const changed = await waitFor(() => read() !== original);
     expect(changed).toBe(true);
@@ -215,11 +219,13 @@ describe('V0.2 · 拖拽重排（真实 Chrome + 真实文件）', () => {
     expect(reverted).toBe(true);
   }, 60_000);
 
-  it('父容器不是 flex/grid 时明确拒绝拖拽，而不是硬改', async () => {
+  it('父容器不是 flex/grid 时，Shift+拖动明确拒绝重排（而不是硬改）', async () => {
     await page.waitForTimeout(500);
     await select(page, 'h1');
     const from = await center(page, 'h1');
+    await page.keyboard.down('Shift');
     await drag(page, from, { x: from.x + 160, y: from.y });
+    await page.keyboard.up('Shift');
     await page.waitForTimeout(300);
 
     const state = await panelState(page);

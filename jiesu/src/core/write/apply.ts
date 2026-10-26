@@ -11,6 +11,7 @@ import type {
 
 import { anchorOf, findJsxElement, parseSource, type ElementLocator } from '../locate/parse.js';
 import { parseClass, type StyleCategory } from './tailwind-classes.js';
+import { setTranslate } from './translate.js';
 import { pxToTailwindClass } from './units.js';
 
 export type StyleOp =
@@ -24,7 +25,12 @@ export type StyleOp =
       toPx: number;
     }
   | { kind: 'text'; to: string }
-  | { kind: 'inlineStyle'; prop: string; to: string | number };
+  | { kind: 'inlineStyle'; prop: string; to: string | number }
+  /**
+   * 拖拽位移：元素"跟着鼠标走"的落地方式。
+   * 产出 `translate-x-N` / `translate-y-N`，**绝不产出定位坐标**。
+   */
+  | { kind: 'translate'; xPx: number; yPx: number };
 
 /** 一次精确到字符区间的源码修改。 */
 export interface SourceEdit {
@@ -200,6 +206,39 @@ export function applyOp(code: string, locator: ElementLocator, op: StyleOp): App
   const el = located.element;
   const edits: SourceEdit[] = [];
   const anchor = anchorOf(located.path);
+
+  if (op.kind === 'translate') {
+    const target = getClassNameTarget(el);
+    if (target.form === 'unresolved') {
+      return { status: 'unresolved', reason: target.reason, edits: [], changed: false };
+    }
+    if (target.form !== 'string') {
+      return {
+        status: 'unresolved',
+        reason: 'className 是模板拼接，位移改写暂不支持（改不了就明说，不猜）',
+        edits: [],
+        changed: false,
+      };
+    }
+
+    const node = target.node;
+    const raw = code.slice(node.start as number, node.end as number);
+    const { quote, inner } = splitQuotes(raw);
+    const result = setTranslate(inner, op.xPx, op.yPx);
+    if (!result.ok) {
+      return { status: 'unresolved', reason: result.reason ?? '无法生成位移类', edits: [], changed: false };
+    }
+    if (!result.changed) {
+      return finish(code, [], 0, anchor);
+    }
+    edits.push({
+      start: node.start as number,
+      end: node.end as number,
+      before: raw,
+      after: `${quote}${result.text}${quote}`,
+    });
+    return finish(code, edits, 1, anchor);
+  }
 
   if (op.kind === 'class' || op.kind === 'classByPx') {
     const category: StyleCategory = op.category;

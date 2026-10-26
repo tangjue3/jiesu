@@ -17,7 +17,9 @@ function expectNoAbsolutePositioning(code: string) {
   expect(audit.ok).toBe(true);
   expect(code).not.toMatch(/\b(absolute|fixed)\b/);
   expect(code).not.toMatch(/\b(position|left|right|top|bottom|inset)\s*:/);
-  expect(code).not.toMatch(/\b(left|right|top|bottom|inset|translate)-/);
+  // 注意：translate-x-* / translate-y-* **有意放行**（V0.4 策略修订）——
+  // 它仍在文档流里，是"元素跟着鼠标走"唯一安全的落地方式。
+  expect(code).not.toMatch(/\b(left|right|top|bottom|inset)-/);
 }
 
 /** 断言：除目标族外，其它 class token 完全不变。 */
