@@ -18,7 +18,9 @@ await build({
   ...shared,
   entryPoints: ['src/cli/bin.ts'],
   outfile: 'dist/cli/bin.js',
-  banner: { js: '#!/usr/bin/env node' },
+  // 注意：不要在这里加 banner 的 shebang。
+  // src/cli/bin.ts 自带 shebang，esbuild 会保留它；
+  // 再叠一个 banner 会变成两行 #!，Node 只认第一行，第二个直接语法错误。
   external: ['ws'],
 });
 
