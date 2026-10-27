@@ -40,7 +40,7 @@ PORT=5300 ./scripts/demo.sh             # 换端口
 
 ```ts
 // vite.config.ts
-import { jiesu } from 'jiesu';
+import { jiesu } from 'jiesu/vite-plugin';
 export default { plugins: [jiesu(), react()] };  // 顺序不能反
 ```
 
@@ -48,6 +48,16 @@ export default { plugins: [jiesu(), react()] };  // 顺序不能反
 npx jiesu          # 启动编辑服务（写 .jiesu/server.json）
 npm run dev        # 你的项目照常启动
 ```
+
+从零开一个项目：
+
+```bash
+npx jiesu new my-page --title 我的页面
+cd my-page && npm install && npm run dev
+```
+
+> jiesu 尚未发布到 npm，生成的项目用的是 `file:` 软链依赖（指向本地 jiesu），
+> 因此装完就能跑，但绑死了本机路径。发布后把依赖改回版本号即可，配置文件不用动。
 
 ## 目录
 

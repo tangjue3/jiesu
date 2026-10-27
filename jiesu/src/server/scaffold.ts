@@ -6,6 +6,7 @@ import {
   validateProjectName,
   type PluginRef,
 } from '../core/scaffold/templates.js';
+import { resolvePluginRef } from './plugin-ref.js';
 import { EditError } from './session.js';
 
 export interface CreateProjectOptions {
@@ -69,7 +70,9 @@ export function createProject(options: CreateProjectOptions): CreatedProject {
   const files = scaffoldProject({
     name,
     title: options.title,
-    plugin: options.plugin,
+    // 没显式指定插件引用时，按当前 jiesu 的真实安装形态推导：
+    // 本地开发 → file: 依赖（能真的 npm install）；npm 发布后 → ^版本号。
+    plugin: options.plugin ?? resolvePluginRef(),
   });
 
   // 预检：任何目标文件已存在就整体放弃，避免留下半个项目

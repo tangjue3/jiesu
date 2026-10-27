@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+import { resolvePluginRef } from '../server/plugin-ref.js';
 import { createProject } from '../server/scaffold.js';
 import { startServer } from '../server/server.js';
 
@@ -37,6 +38,8 @@ export function runNew(options: NewOptions): NewResult {
       name,
       title: options.title,
     });
+    // 本地开发形态要提醒用户：项目里写的是 file: 依赖，绑死本机路径
+    const ref = resolvePluginRef();
     process.stdout.write(
       [
         '',
@@ -48,6 +51,14 @@ export function runNew(options: NewOptions): NewResult {
         '    npx jiesu        # 另开一个终端，启动编辑服务',
         '    npm run dev      # 打开页面后按 Alt+Shift+J 进入编辑模式',
         '',
+        ...(ref.local
+          ? [
+              '  注意：当前 jiesu 尚未发布到 npm，生成的项目用的是本地开发版依赖：',
+              `    ${ref.dependency}`,
+              '  这个项目不能直接分享给别人（依赖路径绑死了本机）。',
+              '',
+            ]
+          : []),
       ].join('\n'),
     );
     return { ok: true, root: created.root };

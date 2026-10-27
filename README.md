@@ -21,10 +21,10 @@
 
 ## 状态
 
-**内核能力已全部验证，外壳还在补。** 全量 151 个用例通过，`tsc` 零错误。
+**内核能力已全部验证，外壳还在补。** 全量 219 个用例通过，`tsc` 零错误。
 
-已成立：元素级定位、确定性写回、布局语义编辑、HMR 后不丢选中、拖拽重排、拖动位移、图层面板。
-未做：改宽高 / 边框 / 阴影、增删元素、组件替换、跨容器拖拽、AI 辅助、多设备预览。
+已成立：元素级定位、确定性写回、布局语义编辑、HMR 后不丢选中、拖拽重排、拖动位移、图层面板、组件库插入、Studio 三页（画布 / 组件 / 代码）。
+未做：改宽高 / 边框 / 阴影、增删元素、组件替换、跨容器拖拽、AI 辅助、多设备预览、项目页。
 
 细节见 [jiesu/README.md](jiesu/README.md)。
 
@@ -32,7 +32,7 @@
 
 ```
 jiesu/          npm 包（内核 + 覆盖层 + CLI + Vite 插件）
-  src/          纯 TS 内核 / 服务 / 覆盖层 / 插件 / CLI
+  src/          纯 TS 内核 / 服务 / 覆盖层 / 插件 / CLI / Studio
   spikes/       测试与验证（目录约定见 jiesu/spikes/README.md）
   scripts/      打包与一键演示
 docs/           调研、技术方案、Spike 报告、使用指南（索引见 docs/README.md）
@@ -54,6 +54,13 @@ npm run demo          # 起编辑服务 + 演示页面，Ctrl+C 退出
 ```ts
 // vite.config.ts —— 顺序不能反，jiesu 必须在 react() 之前
 plugins: [jiesu(), react()]
+```
+
+或者从零建一个（生成的项目装完依赖就能跑）：
+
+```bash
+npx jiesu new my-page --title 我的页面
+cd my-page && npm install && npm run dev
 ```
 
 ## 一句话定位

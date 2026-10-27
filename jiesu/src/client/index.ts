@@ -157,6 +157,17 @@ class JiesuOverlay {
   private moveLabel!: HTMLDivElement;
 
   private ws!: WebSocket;
+  /**
+   * 连接未就绪时先攒着，连上后补发。
+   *
+   * 为什么需要：原来 `send()` 在 WS 还没 OPEN 时**静默丢弃**消息。
+   * 表现是"用户改了个东西，什么都没发生，也没提示"——
+   * 真实场景：页面刚打开、手比网络快，第一下操作就没了。
+   * 并发跑测试时这个窗口更容易被撞上，于是出现"改动没产生"的偶发失败。
+   */
+  private outbox: ClientMessage[] = [];
+  /** 覆盖层被销毁后不再重连（页面卸载 / 热更新替换） */
+  private disposed = false;
   private selecting = false;
   private selected: Selected | null = null;
   private changes: ChangeRecord[] = [];
@@ -231,22 +242,65 @@ class JiesuOverlay {
     this.buildToast();
   }
 
+  /** 停止重连（页面卸载时调用）。 */
+  dispose(): void {
+    this.disposed = true;
+    this.outbox = [];
+  }
+
   /* ---------------- 连接 ---------------- */
 
   connect(port: number): void {
     const url = `ws://127.0.0.1:${port}/ws`;
     this.ws = new WebSocket(url);
+    this.ws.addEventListener('open', () => {
+      // 连接就绪 → 把攒着的消息补发出去
+      const pending = this.outbox;
+      this.outbox = [];
+      for (const message of pending) {
+        this.ws.send(JSON.stringify(message));
+      }
+    });
     this.ws.addEventListener('message', (event) => {
       const message = JSON.parse(String(event.data)) as ServerMessage;
       this.handleServerMessage(message);
     });
-    this.ws.addEventListener('close', () => this.showToast('与 jiesu 服务的连接已断开', true));
+    this.ws.addEventListener('close', () => {
+      this.showToast('与 jiesu 服务的连接已断开', true);
+      // 自动重连：服务重启后页面不该变成"僵尸"（能看不能改）。
+      // 退避到 3 秒一次，避免服务没起时疯狂重试。
+      window.setTimeout(() => {
+        if (this.disposed) return;
+        this.connect(port);
+      }, 1000);
+    });
   }
 
   private send(message: ClientMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+      return;
     }
+    // 连接还没建立（或者已经断了）：先攒着。
+    // 攒满了就丢最旧的——不能无限涨，否则断线时会一次性重放一堆陈旧操作。
+    this.outbox.push(message);
+    if (this.outbox.length > 20) this.outbox.shift();
+  }
+
+  /**
+   * 发一条"状态快照"（选中态）。
+   *
+   * 与普通消息不同：快照**只有最新那一份有意义**。
+   * 排队补发一串过时的选中态，会让 Studio 显示一个早就取消的选中目标——
+   * 而插入位置错一次就是改错元素。所以这里替换掉队列里所有同类型消息。
+   */
+  private sendSnapshot(message: ClientMessage): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+      return;
+    }
+    this.outbox = this.outbox.filter((item) => item.type !== message.type);
+    this.outbox.push(message);
   }
 
   private handleServerMessage(message: ServerMessage): void {
@@ -362,7 +416,7 @@ class JiesuOverlay {
    */
   private publishSelection(): void {
     if (!this.selected) {
-      this.send({ type: 'selection', payload: { selection: null } });
+      this.sendSnapshot({ type: 'selection', payload: { selection: null } });
       return;
     }
     const element = this.selected.element;
@@ -370,7 +424,7 @@ class JiesuOverlay {
     const locator = parseElementLocator(element) ?? this.selected.locator;
     const tag = element.tagName.toLowerCase();
     const classes = element.className.split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
-    this.send({
+    this.sendSnapshot({
       type: 'selection',
       payload: { selection: { locator, tag, label: classes ? `${tag} · ${classes}` : tag } },
     });
@@ -1898,6 +1952,8 @@ class JiesuOverlay {
     document.addEventListener('pointermove', this.onPointerMove, true);
     document.addEventListener('pointerup', this.onPointerUp, true);
     document.addEventListener('pointercancel', this.onPointerUp, true);
+    // 页面卸载时停掉重连：否则会在 bfcache 里留下一串定时器
+    window.addEventListener('pagehide', () => this.dispose(), { once: true });
     // 阻止浏览器原生的拖拽（拖图片/链接会走 HTML5 DnD，和我们的拖拽冲突）
     document.addEventListener('dragstart', (event) => {
       if (this.drag || this.move) event.preventDefault();

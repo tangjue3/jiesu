@@ -11,7 +11,9 @@
     "dist"
   ],
   "exports": {
-    ".": "./dist/vite-plugin/index.js"
+    ".": "./dist/vite-plugin/index.js",
+    "./vite-plugin": "./dist/vite-plugin/index.js",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

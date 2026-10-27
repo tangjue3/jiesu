@@ -25,10 +25,13 @@ const original = resetFromHead(APP_PATH);
 const restore = (): void => writeFileSync(APP_PATH, original, 'utf8');
 const read = (): string => readFileSync(APP_PATH, 'utf8');
 
-async function waitFor(fn: () => boolean, timeoutMs = 12000): Promise<boolean> {
+async function waitFor(
+  fn: () => boolean | Promise<boolean>,
+  timeoutMs = 12000,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (fn()) return true;
+    if (await fn()) return true;
     await new Promise((res) => setTimeout(res, 100));
   }
   return false;
@@ -200,6 +203,14 @@ describe('V0.2 · 拖拽重排（真实 Chrome + 真实文件）', () => {
   });
 
   it('变更篮记录了一条"调整顺序"的变更', async () => {
+    // 变更篮的渲染走 WebSocket 广播：源码写回成功 ≠ 覆盖层已经渲染出这一条。
+    // 直接读 DOM 会偶发读到空篮子，所以先等它出现。
+    const got = await waitFor(async () => {
+      const state = await panelState(page);
+      return state.basket === 1;
+    });
+    expect(got, '变更篮没有出现那条记录').toBe(true);
+
     const state = await panelState(page);
     expect(state.basket).toBe(1);
     expect(state.summary).toContain('调整顺序');

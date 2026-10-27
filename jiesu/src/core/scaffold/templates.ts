@@ -21,31 +21,41 @@ export interface ProjectFile {
 /**
  * 插件引用方式。
  *
- * 为什么需要它：jiesu 还没发布到 npm，本地开发/测试时生成的项目必须能引用到本地产物，
- * 否则"创建出来的项目跑不起来"。发布后走默认值即可。
+ * importPath：生成的 vite.config.ts 里 import 的模块标识。
+ * dependency：package.json 里声明的依赖版本；`undefined` 表示不写进依赖
+ *   （本地绝对路径引用时用不到依赖声明）。
+ * installNote：写进生成项目 README 的说明（当前引用的是本地开发版还是 npm 版）。
+ *   `undefined` 表示不写这段（默认情况，用户不需要知道这些细节）。
  */
 export interface PluginRef {
-  /** 生成的 vite.config.ts 里 import 的模块标识 */
   importPath: string;
-  /**
-   * package.json 里声明的依赖版本；`undefined` 表示不写进依赖
-   * （本地绝对路径引用时用不到依赖声明）。
-   */
   dependency?: string;
+  installNote?: string;
 }
 
-export const DEFAULT_PLUGIN_REF: PluginRef = {
-  importPath: 'jiesu/vite-plugin',
-  dependency: '^0.5.0',
-};
+/**
+ * 发布形态下的插件 import 标识。
+ *
+ * 为什么这里没有默认的 dependency：
+ * 版本号只有一个真源——jiesu 自己的 package.json。
+ * 模板层是纯函数、不碰磁盘，读不到它；硬编码一个版本必然会漂移
+ * （之前就漂移过：包里写 ^0.5.0，实际版本是 0.1.0，npm 上根本没有这个版本）。
+ * 所以依赖声明由 server 层解析后传进来（见 src/server/plugin-ref.ts）。
+ */
+export const PUBLISHED_PLUGIN_IMPORT_PATH = 'jiesu/vite-plugin';
 
 export interface ScaffoldOptions {
   /** 项目名，同时用作 package.json 的 name 与默认标题 */
   name: string;
   /** 页面标题（index.html 的 title 与 App 里的欢迎语） */
   title?: string;
-  /** 插件引用方式 */
-  plugin?: PluginRef;
+  /**
+   * 插件引用方式（必填）。
+   *
+   * 为什么必填而不给默认值：依赖版本必须来自真实来源，
+   * 模板层不能靠一个写死的常量蒙混过去。
+   */
+  plugin: PluginRef;
 }
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
@@ -70,7 +80,7 @@ export function scaffoldProject(options: ScaffoldOptions): ProjectFile[] {
 
   const name = options.name;
   const title = options.title ?? name;
-  const plugin = options.plugin ?? DEFAULT_PLUGIN_REF;
+  const plugin = options.plugin;
 
   const dependencies: Record<string, string> = {
     react: '^19.0.0',
@@ -233,7 +243,7 @@ npm run dev
 
 页面打开后按 \`Alt+Shift+J\` 进入编辑模式：点元素改样式、按住拖动改位置、面板底部插入组件。
 所有改动都直接写回 \`src/App.tsx\`，不存在"导出"这一步。
-`,
+${plugin.installNote ? `\n## 关于 jiesu 依赖\n\n${plugin.installNote}\n` : ''}`,
     },
   ];
 

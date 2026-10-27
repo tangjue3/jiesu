@@ -10,4 +10,4 @@ coverage/
 # 测试沙箱（脚手架生成的项目）
 .sandbox
 .sandbox-cli
-.sandbox-cli
+.sandbox-install

@@ -169,6 +169,15 @@ describe('V0.6 · Studio 壳（真实 Chrome）', () => {
     await page.click('#undo-btn');
     const restored = await waitFor(() => read() === original);
     expect(restored).toBe(true);
+    // 撤销走的是 WebSocket 广播：文件恢复与 Studio 收到通知是两件事，
+    // 只等文件会让断言偶发抢在页面刷新之前。这里等 Studio 真的显示"空"。
+    const emptied = await waitFor(async () => {
+      const text = await page.textContent('#change-count');
+      return Boolean(text?.includes('空'));
+    });
+    expect(emptied, `撤销后变更篮未清空，当前显示：${await page.textContent('#change-count')}`).toBe(
+      true,
+    );
     expect(await page.textContent('#change-count')).toContain('空');
   });
 
