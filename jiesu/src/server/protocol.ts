@@ -31,8 +31,25 @@ export interface ChangeRecord {
   locator?: ElementLocator;
 }
 
+/** 画布当前选中的元素（Studio 需要它才能算"插入到哪"）。 */
+export interface SelectionInfo {
+  locator: ElementLocator;
+  /** 标签名，如 section / h2 */
+  tag: string;
+  /** 一行摘要，如 `section · mt-6 rounded-lg` */
+  label: string;
+}
+
 export type ClientMessage =
   | { type: 'hello' }
+  /**
+   * 覆盖层报告"我选中了谁"。
+   *
+   * 为什么需要它：Studio（画布外面那层壳）必须知道当前选中的是哪个元素，
+   * 否则"从组件库插到选中元素下方"就无从算起。选中态只有一个真源——覆盖层，
+   * Studio 只是订阅者，不自己维护一份。
+   */
+  | { type: 'selection'; payload: { selection: SelectionInfo | null } }
   | {
       type: 'requestChange';
       payload: {
@@ -62,6 +79,11 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { type: 'ready'; payload: { projectRoot: string; clientCount: number } }
+  /**
+   * 当前选中态广播。新连上的客户端会立刻收到一次当前值（可能为 null），
+   * 这样 Studio 刷新页面后不需要额外拉一次接口。
+   */
+  | { type: 'selection'; payload: { selection: SelectionInfo | null } }
   | {
       type: 'changeApplied';
       payload: {

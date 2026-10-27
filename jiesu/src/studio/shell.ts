@@ -45,7 +45,7 @@ export const NAV_ITEMS: NavItem[] = [
     id: 'components',
     label: '组件',
     icon: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
-    ready: false,
+    ready: true,
   },
   {
     id: 'styles',
@@ -197,6 +197,36 @@ input { font-family: inherit; font-size: inherit; color: inherit; }
 .empty p { margin: 0; max-width: 460px; line-height: 1.7; font-size: 12.5px; }
 .empty code { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; font-size: 11.5px; }
 
+/* 组件库 */
+.lib { flex: 1; min-width: 0; display: flex; }
+.lib-side { width: 232px; flex: 0 0 232px; background: var(--panel); border-right: 1px solid var(--border); padding: 14px; overflow: auto; }
+.lib-search input { width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); outline: none; font-size: 12px; }
+.lib-search input:focus { border-color: var(--primary); background: var(--panel); }
+.lib-groups { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { height: 26px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); font-size: 12px; color: var(--text-2); }
+.chip:hover { border-color: #d7dEEA; }
+.chip.on { background: var(--primary-soft); border-color: #d6e0fd; color: var(--primary); }
+.lib-main { flex: 1; min-width: 0; padding: 16px 18px; overflow: auto; }
+.lib-target { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); margin-bottom: 12px; flex-wrap: wrap; }
+.lib-target b { color: var(--text); font-weight: 500; }
+.lib-target .warn { color: #B45309; }
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.card { border: 1px solid var(--border); background: var(--panel); border-radius: 10px; padding: 12px; cursor: pointer; text-align: left; }
+.card:hover { border-color: #cfdbfa; box-shadow: 0 4px 14px rgba(16,24,40,.06); }
+.card.on { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+.card .name { font-size: 13px; font-weight: 500; }
+.card .group { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+.card .code { margin-top: 9px; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-detail { width: 320px; flex: 0 0 320px; background: var(--panel); border-left: 1px solid var(--border); padding: 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.lib-detail h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.lib-detail .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.lib-detail .tag { font-size: 11px; color: var(--text-2); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+.lib-detail pre { margin: 0; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 11px; line-height: 1.7; overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-word; }
+.lib-actions { display: flex; gap: 6px; }
+.lib-actions .btn { flex: 1; }
+.lib-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+.lib-empty { color: var(--text-3); font-size: 12px; padding: 28px 0; text-align: center; }
+
 /* 代码页 */
 .code-wrap { flex: 1; min-width: 0; display: flex; }
 .change-list { width: 320px; flex: 0 0 320px; background: var(--panel); border-right: 1px solid var(--border); overflow: auto; }
@@ -278,6 +308,22 @@ export function renderShell(): string {
             <div class="frame-bar"><span id="frame-label">桌面 · 1440</span></div>
             <iframe id="canvas-frame" title="画布" src="about:blank"></iframe>
           </div>
+        </div>
+      </section>
+
+      <section class="page" data-page="components">
+        <div class="lib">
+          <aside class="lib-side">
+            <div class="lib-search">
+              <input id="lib-search" placeholder="搜索组件（名称 / 标签）" spellcheck="false" />
+            </div>
+            <div class="lib-groups" id="lib-groups"></div>
+          </aside>
+          <div class="lib-main">
+            <div class="lib-target" id="lib-target"></div>
+            <div class="lib-grid" id="lib-grid"></div>
+          </div>
+          <aside class="lib-detail" id="lib-detail"></aside>
         </div>
       </section>
 

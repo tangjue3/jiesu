@@ -7,6 +7,19 @@
  *  3. **数据只从服务端来**：变更列表、撤销都走 /api/*，不在前端自己维护一份影子状态
  */
 
+import {
+  COMPONENT_TEMPLATES,
+  groupTemplates,
+  searchTemplates,
+  type ComponentTemplate,
+} from '../core/library/components.js';
+
+interface SelectionInfo {
+  locator: { filePath: string; line: number; column: number; anchor?: string };
+  tag: string;
+  label: string;
+}
+
 interface ChangeRecord {
   id: string;
   filePath: string;
@@ -34,7 +47,7 @@ const PAGE_TITLES: Record<string, { title: string; sub: string }> = {
   code: { title: '代码同步', sub: '每次改动都可逐条撤销' },
   home: { title: '首页', sub: '即将上线' },
   projects: { title: '项目', sub: '即将上线' },
-  components: { title: '组件', sub: '即将上线' },
+  components: { title: '组件', sub: '插入的是一段真实 JSX' },
   styles: { title: '样式', sub: '即将上线' },
   responsive: { title: '适配', sub: '即将上线' },
   ai: { title: 'AI', sub: '即将上线' },
@@ -67,13 +80,21 @@ const state = {
   device: store.device,
   changes: [] as ChangeRecord[],
   selectedId: null as string | null,
+  /** 画布当前选中的元素（真源在覆盖层，这里只是订阅） */
+  selection: null as SelectionInfo | null,
+  /** 组件库筛选状态 */
+  libQuery: '',
+  libGroup: '全部',
+  templateId: COMPONENT_TEMPLATES[0]?.id ?? '',
 };
+
+let socket: WebSocket | null = null;
 
 /* ---------------- 页面切换 ---------------- */
 
 function switchPage(id: string): void {
   const meta = PAGE_TITLES[id];
-  const implemented = id === 'canvas' || id === 'code';
+  const implemented = id === 'canvas' || id === 'code' || id === 'components';
   state.page = implemented ? id : 'todo';
 
   for (const button of document.querySelectorAll<HTMLElement>('[data-nav]')) {
@@ -92,6 +113,7 @@ function switchPage(id: string): void {
       '这一页还没做。先做画布与代码同步——它们是产品是否成立的关键，其余六页等这两页跑通再说。';
   }
   if (state.page === 'code') void loadChanges();
+  if (state.page === 'components') renderLibrary();
 }
 
 /* ---------------- 画布 ---------------- */
@@ -267,6 +289,140 @@ async function undoChange(changeId: string): Promise<void> {
   }
 }
 
+/* ---------------- 组件库 ---------------- */
+
+/** 卡片上只显示片段的第一行，剩下的在详情里看。 */
+function firstLine(snippet: string): string {
+  const line = snippet.split('\n')[0].trim();
+  return line.length > 64 ? `${line.slice(0, 64)}…` : line;
+}
+
+function visibleTemplates(): ComponentTemplate[] {
+  const matched = searchTemplates(state.libQuery);
+  if (state.libGroup === '全部') return matched;
+  return matched.filter((template) => template.group === state.libGroup);
+}
+
+function renderLibrary(): void {
+  renderGroups();
+
+  const target = $('#lib-target');
+  if (state.selection) {
+    const { label, locator } = state.selection;
+    target.innerHTML =
+      `插入目标：<b>${escapeHtml(label)}</b>` +
+      `<span>${escapeHtml(locator.filePath)}:${locator.line}</span>`;
+  } else {
+    target.innerHTML =
+      '<span class="warn">还没选中元素</span>' +
+      '<span>先在画布页点一个元素——插入需要它当参照（上方 / 下方 / 内部）</span>';
+  }
+
+  const grid = $('#lib-grid');
+  const items = visibleTemplates();
+  if (items.length === 0) {
+    grid.innerHTML = '<div class="lib-empty">没有匹配的组件</div>';
+  } else {
+    grid.innerHTML = '';
+    for (const template of items) {
+      const card = document.createElement('button');
+      card.className = `card${template.id === state.templateId ? ' on' : ''}`;
+      card.dataset.template = template.id;
+      card.innerHTML =
+        `<div class="name">${escapeHtml(template.name)}</div>` +
+        `<div class="group">${escapeHtml(template.group)}</div>` +
+        `<div class="code">${escapeHtml(firstLine(template.snippet))}</div>`;
+      card.onclick = () => {
+        state.templateId = template.id;
+        renderLibrary();
+      };
+      grid.appendChild(card);
+    }
+  }
+
+  renderDetail();
+}
+
+function renderGroups(): void {
+  const box = $('#lib-groups');
+  const groups = ['全部', ...groupTemplates().map((entry) => entry.group)];
+  box.innerHTML = '';
+  for (const group of groups) {
+    const chip = document.createElement('button');
+    chip.className = `chip${group === state.libGroup ? ' on' : ''}`;
+    chip.dataset.group = group;
+    chip.textContent = group;
+    chip.onclick = () => {
+      state.libGroup = group;
+      renderLibrary();
+    };
+    box.appendChild(chip);
+  }
+}
+
+function renderDetail(): void {
+  const box = $('#lib-detail');
+  const template = COMPONENT_TEMPLATES.find((item) => item.id === state.templateId);
+  if (!template) {
+    box.innerHTML = '<div class="lib-empty">选一个组件看详情</div>';
+    return;
+  }
+
+  const disabled = state.selection ? '' : ' disabled';
+  box.innerHTML = `
+    <h3>${escapeHtml(template.name)}</h3>
+    <div class="tags">
+      <span class="tag">${escapeHtml(template.group)}</span>
+      ${template.tags.slice(0, 3).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}
+    </div>
+    <pre>${escapeHtml(template.snippet)}</pre>
+    <div class="lib-actions">
+      <button class="btn" data-pos="before"${disabled}>上方</button>
+      <button class="btn" data-pos="after"${disabled}>下方</button>
+      <button class="btn primary" data-pos="last"${disabled}>插到内部</button>
+    </div>
+    <div class="lib-hint">
+      插入的是<b>真实代码</b>：会往源文件里写这一段 JSX，画布立刻热更新，代码页可逐条撤销。
+      ${state.selection ? '' : '当前没有插入目标，先在画布上选中一个元素。'}
+    </div>`;
+
+  for (const button of box.querySelectorAll<HTMLButtonElement>('[data-pos]')) {
+    button.onclick = () => {
+      const position = button.dataset.pos as 'before' | 'after' | 'last';
+      insertTemplate(template, position);
+    };
+  }
+}
+
+function insertTemplate(template: ComponentTemplate, position: 'before' | 'after' | 'last'): void {
+  if (!state.selection) {
+    showToast('先在画布上选中一个元素，插入需要它作为参照');
+    return;
+  }
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    showToast('与编辑服务的连接已断开，无法插入');
+    return;
+  }
+
+  const op =
+    position === 'last'
+      ? { kind: 'insertChild', position: 'last', snippet: template.snippet }
+      : { kind: 'insert', position, snippet: template.snippet };
+  const where = position === 'before' ? '上方' : position === 'after' ? '下方' : '内部';
+
+  socket.send(
+    JSON.stringify({
+      type: 'requestStructure',
+      payload: {
+        locator: state.selection.locator,
+        op,
+        summary: `插入 ${template.name}（${where}）`,
+      },
+    }),
+  );
+  showToast(`正在插入 ${template.name}（${where}）…`);
+}
+
 /* ---------------- 反馈与连接 ---------------- */
 
 let toastTimer: number | null = null;
@@ -304,7 +460,7 @@ function connect(): void {
     return;
   }
 
-  const socket = new WebSocket(`ws://${location.hostname}:${port}/ws`);
+  socket = new WebSocket(`ws://${location.hostname}:${port}/ws`);
   socket.onopen = () => {
     dot.classList.add('ok');
     text.textContent = '已连接';
@@ -315,13 +471,28 @@ function connect(): void {
     text.textContent = '连接断开';
   };
   socket.onmessage = (event) => {
+    let message: { type: string; payload?: { selection?: SelectionInfo | null; message?: string } };
     try {
-      const message = JSON.parse(String(event.data)) as { type: string };
-      if (message.type === 'changeApplied' || message.type === 'changeUndone') {
-        if (state.page === 'code') void loadChanges();
-      }
+      message = JSON.parse(String(event.data)) as typeof message;
     } catch {
-      /* 忽略解析失败 */
+      return;
+    }
+
+    switch (message.type) {
+      // 覆盖层上报的选中态：组件页的"插入目标"靠它
+      case 'selection':
+        state.selection = message.payload?.selection ?? null;
+        if (state.page === 'components') renderLibrary();
+        break;
+      case 'changeApplied':
+      case 'changeUndone':
+        if (state.page === 'code') void loadChanges();
+        break;
+      case 'error':
+        showToast(String(message.payload?.message ?? '操作失败'));
+        break;
+      default:
+        break;
     }
   };
 }
@@ -344,6 +515,11 @@ function boot(): void {
     button.onclick = () => applyDevice(button.dataset.device ?? 'desktop');
   }
 
+  $<HTMLInputElement>('#lib-search').addEventListener('input', (event) => {
+    state.libQuery = (event.target as HTMLInputElement).value;
+    renderLibrary();
+  });
+
   $('#open-btn').onclick = () => openUrl($<HTMLInputElement>('#url-input').value);
   $<HTMLInputElement>('#url-input').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') openUrl($<HTMLInputElement>('#url-input').value);
@@ -364,7 +540,7 @@ function boot(): void {
   });
 
   const initialPage = params.get('page');
-  switchPage(initialPage === 'code' ? 'code' : 'canvas');
+  switchPage(initialPage === 'code' || initialPage === 'components' ? initialPage : 'canvas');
 
   connect();
 }

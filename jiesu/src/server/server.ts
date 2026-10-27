@@ -6,7 +6,7 @@ import type { LayoutOp } from '../core/layout/apply-layout.js';
 import type { StyleOp } from '../core/write/apply.js';
 import { handleStudioRequest } from '../studio/serve.js';
 import { EditError, EditSession } from './session.js';
-import type { ClientMessage, ServerMessage } from './protocol.js';
+import type { ClientMessage, SelectionInfo, ServerMessage } from './protocol.js';
 
 const LAYOUT_OP_KINDS = new Set([
   'flexDirection',
@@ -45,6 +45,9 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   const session = new EditSession(projectRoot);
   // 端口要等 listen 之后才知道，但 Studio 页面在 listen 前就已注册好处理函数
   let runningPort = 0;
+  // 画布当前选中态。真源在覆盖层，服务端只做"最近一次"的缓存与广播，
+  // 这样 Studio 刷新后能立刻知道该往哪儿插。
+  let lastSelection: SelectionInfo | null = null;
 
   const httpServer: HttpServer = createServer((req, res) => {
     void handleStudioRequest(req, res, {
@@ -84,6 +87,7 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
 
   wss.on('connection', (socket) => {
     send(socket, { type: 'ready', payload: { projectRoot, clientCount: wss.clients.size } });
+    send(socket, { type: 'selection', payload: { selection: lastSelection } });
 
     socket.on('message', (raw) => {
       let message: ClientMessage;
@@ -91,6 +95,13 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
         message = JSON.parse(String(raw)) as ClientMessage;
       } catch {
         send(socket, { type: 'error', payload: { message: '消息格式错误' } });
+        return;
+      }
+
+      // 选中态是 UI 状态，不进编辑链路：单独处理，避免污染 handleMessage 的分支
+      if (message.type === 'selection') {
+        lastSelection = message.payload.selection;
+        broadcast({ type: 'selection', payload: { selection: lastSelection } });
         return;
       }
 

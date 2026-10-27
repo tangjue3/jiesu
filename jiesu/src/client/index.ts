@@ -354,6 +354,28 @@ class JiesuOverlay {
    * 抽成单一入口的原因：图层树和画布必须完全一致地表现"当前选中"，
    * 否则两处状态会各自漂移。
    */
+  /**
+   * 把当前选中态报告给服务端，Studio 靠它算"插到哪"。
+   *
+   * 为什么选中态只有一个真源（这里）：Studio 是画布外面的壳，它看不到 iframe 内部，
+   * 如果它也自己记一份"当前选中"，两边迟早会漂移——而插入位置错一次就是改错元素。
+   */
+  private publishSelection(): void {
+    if (!this.selected) {
+      this.send({ type: 'selection', payload: { selection: null } });
+      return;
+    }
+    const element = this.selected.element;
+    // 发送前从活着的 DOM 重读：任何缓存的锚点都可能已经过期
+    const locator = parseElementLocator(element) ?? this.selected.locator;
+    const tag = element.tagName.toLowerCase();
+    const classes = element.className.split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+    this.send({
+      type: 'selection',
+      payload: { selection: { locator, tag, label: classes ? `${tag} · ${classes}` : tag } },
+    });
+  }
+
   private selectElement(element: HTMLElement): boolean {
     const locator = parseElementLocator(element);
     if (!locator) {
@@ -371,6 +393,7 @@ class JiesuOverlay {
     this.paintSelection(element);
     this.renderPanel();
     this.revealInLayers(element);
+    this.publishSelection();
     return true;
   }
 
@@ -842,6 +865,7 @@ class JiesuOverlay {
     // 节点被替换了 → 图层树里的引用也过期了，重建并重新高亮
     this.layersDirty = true;
     this.renderLayers();
+    this.publishSelection();
   }
 
   /**
@@ -863,6 +887,8 @@ class JiesuOverlay {
     };
     this.paintSelection(element);
     this.updatePanelValues();
+    // 锚点/行号可能变了 → 插到当前位置前，Studio 必须拿到最新的那个
+    this.publishSelection();
   }
 
   /**
@@ -1125,7 +1151,9 @@ class JiesuOverlay {
 
   private closePanel(): void {
     this.panel.classList.remove('on');
+    const had = this.selected !== null;
     this.selected = null;
+    if (had) this.publishSelection();
     // 选中态是共享的：面板关掉，图层树里的高亮也要一起清掉
     this.renderLayers();
   }
