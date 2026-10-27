@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import type { LayoutOp } from '../core/layout/apply-layout.js';
 import type { StyleOp } from '../core/write/apply.js';
+import { handleStudioRequest } from '../studio/serve.js';
 import { EditError, EditSession } from './session.js';
 import type { ClientMessage, ServerMessage } from './protocol.js';
 
@@ -42,15 +43,31 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   const { projectRoot } = options;
   const host = options.host ?? '127.0.0.1';
   const session = new EditSession(projectRoot);
+  // 端口要等 listen 之后才知道，但 Studio 页面在 listen 前就已注册好处理函数
+  let runningPort = 0;
 
   const httpServer: HttpServer = createServer((req, res) => {
-    if (req.url === '/health') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, projectRoot, changes: session.getChanges().length }));
-      return;
-    }
-    res.writeHead(404);
-    res.end();
+    void handleStudioRequest(req, res, {
+      projectRoot,
+      // 端口在 listen 之后才知道；Studio 页面上的连接提示用的是这个值，
+      // 所以这里用闭包读，而不是把创建时的 undefined 固化下来。
+      get port() {
+        return runningPort;
+      },
+      changes: () => session.getChanges(),
+      undo: (changeId) => {
+        session.undo(changeId);
+      },
+    }).then((handled) => {
+      if (handled) return;
+      if (req.url === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, projectRoot, changes: session.getChanges().length }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
   });
 
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -99,6 +116,7 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
       resolvePort(typeof address === 'object' && address ? address.port : 0);
     });
   });
+  runningPort = port;
 
   return {
     port,

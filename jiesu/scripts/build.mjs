@@ -22,10 +22,13 @@ await build({
   ...shared,
   entryPoints: ['src/cli/bin.ts'],
   outfile: 'dist/cli/bin.js',
+  // esbuild 只在"从源码跑 Studio"这条兜底路径里用，打进 ESM 产物会因为它的 CJS
+  // `require('fs')` 在加载期直接崩（Dynamic require of "fs" is not supported）。
+  // 发布形态读预打好的 dist/studio/main.js，走不到这条路径。
   // 注意：不要在这里加 banner 的 shebang。
   // src/cli/bin.ts 自带 shebang，esbuild 会保留它；
   // 再叠一个 banner 会变成两行 #!，Node 只认第一行，第二个直接语法错误。
-  external: ['ws'],
+  external: ['ws', 'esbuild'],
 });
 
 await build({
@@ -49,6 +52,19 @@ await build({
   sourcemap: false,
 });
 
+// Studio 前端同理：打包后没有 src/studio/main.ts 可读，必须预先产出
+await build({
+  entryPoints: ['src/studio/main.ts'],
+  outfile: 'dist/studio/main.js',
+  bundle: true,
+  write: true,
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2020',
+  logLevel: 'info',
+  sourcemap: false,
+});
+
 process.stdout.write(
-  '\n构建完成：dist/cli/bin.js · dist/vite-plugin/index.js · dist/client/overlay.js\n',
+  '\n构建完成：dist/cli/bin.js · dist/vite-plugin/index.js · dist/client/overlay.js · dist/studio/main.js\n',
 );

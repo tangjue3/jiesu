@@ -61,7 +61,8 @@ const STYLE = `
 .jd-row.stacked > label { flex: 0 0 100%; }
 .jd-row input[type=number], .jd-row input[type=text], .jd-row select { width: 104px; padding: 3px 6px; border: 1px solid rgba(0,0,0,.16); border-radius: 4px; font-size: 12px; }
 .jd-row textarea { width: 100%; padding: 4px 6px; border: 1px solid rgba(0,0,0,.16); border-radius: 4px; font-size: 12px; resize: vertical; }
-.jd-sw { display: flex; gap: 4px; flex-wrap: wrap; flex: 0 0 auto; }
+.jd-sw { display: flex; gap: 4px; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
+.jd-row.actions .jd-sw { flex: 0 0 auto; justify-content: flex-start; }
 .jd-sw button.jd-chip { width: 18px; height: 18px; border-radius: 3px; border: 1px solid rgba(0,0,0,.16); cursor: pointer; padding: 0; flex: 0 0 auto; }
 .jd-sw button.jd-chip.on { outline: 2px solid #2563eb; outline-offset: 1px; }
 .jd-btn { padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(0,0,0,.16); background: #fff; cursor: pointer; font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
@@ -77,7 +78,7 @@ const STYLE = `
 .jd-basket .jd-bempty { padding: 10px; color: #94a3b8; }
 .jd-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111827; color: #fff; padding: 8px 14px; border-radius: 6px; pointer-events: none; display: none; max-width: 60vw; }
 .jd-toast.err { background: #b91c1c; }
-.jd-hint { position: fixed; left: 50%; transform: translateX(-50%); top: 12px; background: rgba(17,24,39,.92); color: #fff; padding: 7px 11px; border-radius: 6px; pointer-events: none; display: none; }
+.jd-hint { position: fixed; left: 12px; top: 12px; max-width: 46vw; background: rgba(17,24,39,.92); color: #fff; padding: 7px 11px; border-radius: 6px; pointer-events: none; display: none; line-height: 1.5; }
 .jd-hint.on { display: block; }
 .jd-drop { position: fixed; background: #ea580c; border-radius: 2px; pointer-events: none; display: none; box-shadow: 0 0 0 1px rgba(255,255,255,.85); }
 .jd-drop.bad { background: #94a3b8; }
@@ -100,6 +101,13 @@ const STYLE = `
 .jd-lrow.sel .jd-ltag { color: #c2410c; }
 .jd-lcls { color: #94a3b8; font-family: ui-monospace, Menlo, monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
 .jd-ltxt { color: #64748b; font-size: 10px; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+/* 窄视口（手机画板）：右侧 268px 面板会盖住大半个页面 → 改成底部抽屉 */
+@media (max-width: 640px) {
+  .jd-panel { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: 56vh; border-left: 0; border-top: 1px solid rgba(0,0,0,.12); border-radius: 12px 12px 0 0; }
+  .jd-layers { width: min(232px, 74vw); }
+  .jd-hint { max-width: 70vw; }
+  .jd-basket { max-width: calc(100vw - 24px); }
+}
 .jd-tab-l { position: fixed; left: 0; top: 50%; transform: translateY(-50%); background: rgba(17,24,39,.9); color: #fff; padding: 9px 4px; border-radius: 0 5px 5px 0; pointer-events: auto; cursor: pointer; writing-mode: vertical-rl; font-size: 11px; display: none; }
 .jd-tab-l.on { display: block; }
 `;
@@ -1865,6 +1873,10 @@ class JiesuOverlay {
     // 阻止浏览器原生的拖拽（拖图片/链接会走 HTML5 DnD，和我们的拖拽冲突）
     document.addEventListener('dragstart', (event) => {
       if (this.drag || this.move) event.preventDefault();
+    });
+    // 视口变化（切设备、拉窗口）后选中框与标签会停在旧坐标上 → 重画一次
+    window.addEventListener('resize', () => {
+      if (this.selected) this.paintSelection(this.selected.element);
     });
     this.ensureObserver();
     // 脚本在 <head> 执行时 body 尚不存在，等 DOM 就绪再画第一次
